@@ -72,9 +72,6 @@ private slots:
     void onJumpToDfu();
     void onDfuFileBrowse();
     void onDfuFlash();
-    void startDfuFlash(const QString &program, const QStringList &args);
-    void onDfuProcessOutput();
-    void onDfuProcessFinished(int exitCode);
     void onDfuCheckTool();
     void tryDownloadDfuUtil();
     void onDfuDownloadFinished(QNetworkReply *reply);
@@ -196,7 +193,6 @@ private:
     QProcess       *m_dfuProcess;
     QString         m_dfuFilePath;
     bool            m_inDfuMode;
-    int             m_dfuRetryCount;
 
     /* 网络下载 dfu-util */
     QNetworkAccessManager *m_netManager;

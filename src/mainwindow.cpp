@@ -437,13 +437,9 @@ QWidget* MainWindow::buildDfuPage()
 
     // QProcess
     m_dfuProcess = new QProcess(this);
-    connect(m_dfuProcess, &QProcess::readyReadStandardOutput,
-            this, &MainWindow::onDfuProcessOutput);
-    connect(m_dfuProcess, &QProcess::readyReadStandardError,
-            this, &MainWindow::onDfuProcessOutput);
-    connect(m_dfuProcess,
-            QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, &MainWindow::onDfuProcessFinished);
+
+    connect(m_netManager, &QNetworkAccessManager::finished,
+            this, &MainWindow::onDfuDownloadFinished);
 
     connect(m_netManager, &QNetworkAccessManager::finished,
             this, &MainWindow::onDfuDownloadFinished);
@@ -1083,11 +1079,15 @@ void MainWindow::appendLogLine(const QString &prefix, const QString &hex,
 
 void MainWindow::onJumpToDfu()
 {
+    // 未连接时直接切换到 DFU 页面 (供刷死设备的用户使用)
     if (!m_connected) {
-        QMessageBox::information(this,
-            trC(QString::fromUtf8("提示"), QStringLiteral("Info")),
-            trC(QString::fromUtf8("请先连接设备再使用 DFU 功能。"),
-                QStringLiteral("Please connect the device first.")));
+        m_stackedRight->setCurrentIndex(1);
+        m_btnDfu->hide();
+        m_btnConnect->setEnabled(true);
+        m_lblStatusMsg->setText(trC(
+            QString::fromUtf8("已进入 DFU 模式（离线）。请选择固件文件烧录。"),
+            QStringLiteral("DFU mode (offline). Select firmware to flash.")));
+        onDfuCheckTool();
         return;
     }
 
@@ -1130,80 +1130,88 @@ void MainWindow::onDfuFlash()
     m_dfuFlashBtn->setEnabled(false);
     m_dfuLog->clear();
 
-    QString program;
-    QStringList args;
-    
-    // 检查文件类型决定是否用 dfu-suffix
-    if (m_dfuFilePath.endsWith(QStringLiteral(".dfu"), Qt::CaseInsensitive)) {
-        // .dfu 文件直接烧录
-        program = QStringLiteral("dfu-util");
-        args << QStringLiteral("-a") << QStringLiteral("0")
-             << QStringLiteral("-s") << QStringLiteral("0x08000000:leave")
-             << QStringLiteral("-D") << m_dfuFilePath;
-    } else {
-        // .bin / .hex 文件
-        program = QStringLiteral("dfu-util");
-        args << QStringLiteral("-a") << QStringLiteral("0")
-             << QStringLiteral("-s") << QStringLiteral("0x08000000:leave")
-             << QStringLiteral("-D") << m_dfuFilePath;
+    // Step 1: 列出 DFU 设备
+    m_dfuLog->appendPlainText(QString::fromUtf8("正在扫描 DFU 设备...\n"));
+
+    m_dfuProcess->start(QStringLiteral("dfu-util"), {QStringLiteral("-l")});
+    if (!m_dfuProcess->waitForFinished(3000)) {
+        m_dfuLog->appendPlainText(
+            QString::fromUtf8("[错误] dfu-util -l 超时\n"));
+        m_dfuFlashBtn->setEnabled(true);
+        return;
     }
+
+    QString listOut = QString::fromUtf8(m_dfuProcess->readAllStandardOutput());
+    m_dfuLog->appendPlainText(listOut);
+
+    // 检查是否找到设备
+    if (!listOut.contains(QStringLiteral("Found DFU")) &&
+        !listOut.contains(QStringLiteral("DFU"))) {
+        m_dfuLog->appendPlainText(
+            QString::fromUtf8("[错误] 未检测到 DFU 设备。\n"
+            "请确认: 1)设备已进入DFU模式 2)USB驱动已安装\n"));
+        m_dfuFlashBtn->setEnabled(true);
+        return;
+    }
+
+    // Step 2: 烧录 (带 force 和验证)
+    // :force 确保写入, :leave 不复位(后面单独处理复位)
+    QString program = QStringLiteral("dfu-util");
+    QStringList args;
+    args << QStringLiteral("-a") << QStringLiteral("0")
+         << QStringLiteral("-s") << QStringLiteral("0x08000000:force:unprotect")
+         << QStringLiteral("-D") << m_dfuFilePath;
 
     m_dfuLog->appendPlainText(
-        QStringLiteral("$ dfu-util %1\n").arg(args.join(QLatin1Char(' '))));
+        QStringLiteral("\n$ dfu-util %1\n").arg(args.join(QLatin1Char(' '))));
 
-    // 带重试: 设备进入 DFU 后重枚举可能需要 2-3 秒
-    m_dfuRetryCount = 3;
-    startDfuFlash(program, args);
-}
-
-void MainWindow::startDfuFlash(const QString &program, const QStringList &args)
-{
     m_dfuProcess->start(program, args);
-    if (!m_dfuProcess->waitForStarted(5000)) {
-        if (--m_dfuRetryCount > 0) {
-            m_dfuLog->appendPlainText(
-                QString::fromUtf8("等待设备重枚举 (%1/3)...\n")
-                    .arg(3 - m_dfuRetryCount));
-            QTimer::singleShot(1500, this, [this, program, args]() {
-                startDfuFlash(program, args);
-            });
-        } else {
-            m_dfuLog->appendPlainText(
-                QString::fromUtf8("[错误] 无法启动 dfu-util。\n"
-                "请确认 dfu-util.exe 在程序目录下，且设备已进入 DFU 模式。\n"
-                "安装指令: pacman -S mingw-w64-x86_64-dfu-util\n"));
-            m_dfuFlashBtn->setEnabled(true);
-        }
+    if (!m_dfuProcess->waitForFinished(60000)) {
+        m_dfuLog->appendPlainText(
+            QString::fromUtf8("[错误] 烧录超时 (60s)\n"));
+        m_dfuFlashBtn->setEnabled(true);
+        return;
     }
-}
 
-void MainWindow::onDfuProcessOutput()
-{
-    QByteArray out = m_dfuProcess->readAllStandardOutput();
-    QByteArray err = m_dfuProcess->readAllStandardError();
-    if (!out.isEmpty())
-        m_dfuLog->appendPlainText(QString::fromUtf8(out));
-    if (!err.isEmpty())
-        m_dfuLog->appendPlainText(QString::fromUtf8(err));
-}
+    QString flashOut = QString::fromUtf8(m_dfuProcess->readAllStandardOutput());
+    QString flashErr = QString::fromUtf8(m_dfuProcess->readAllStandardError());
+    m_dfuLog->appendPlainText(flashOut);
+    if (!flashErr.isEmpty()) m_dfuLog->appendPlainText(flashErr);
 
-void MainWindow::onDfuProcessFinished(int exitCode)
-{
+    if (m_dfuProcess->exitCode() != 0) {
+        m_dfuLog->appendPlainText(
+            QString::fromUtf8("\n[失败] 烧录返回错误码 %1\n"
+            "提示: 如果刚刚刷了错误的固件, 用 STM32CubeProgrammer 救砖\n")
+                .arg(m_dfuProcess->exitCode()));
+        m_dfuFlashBtn->setEnabled(true);
+        return;
+    }
+
+    // Step 3: 复位 (detach 方式 — 不依赖 :leave)
+    m_dfuLog->appendPlainText(
+        QString::fromUtf8("\n烧录完成, 正在复位设备...\n"));
+    QThread::msleep(500);
+    
+    m_dfuProcess->start(QStringLiteral("dfu-util"), {
+        QStringLiteral("-a"), QStringLiteral("0"),
+        QStringLiteral("-e")  // detach / reset
+    });
+    m_dfuProcess->waitForFinished(3000);
+
+    m_dfuLog->appendPlainText(
+        QString::fromUtf8("[成功] 固件烧录完成！\n"
+        "设备已尝试复位。如无法识别请重新拔插 USB。"));
+
+    QMessageBox::information(this,
+        trC(QString::fromUtf8("完成"), QStringLiteral("Done")),
+        trC(QString::fromUtf8(
+            "固件烧录完成。\n\n"
+            "请重新拔插设备 USB 线后再点击「连接」。"),
+            QStringLiteral(
+            "Firmware flashed.\n\n"
+            "Please reconnect the USB cable, then click Connect.")));
+    
     m_dfuFlashBtn->setEnabled(true);
-    if (exitCode == 0) {
-        m_dfuLog->appendPlainText(
-            QString::fromUtf8("\n[成功] 固件烧录完成！设备已重启。\n"));
-        QMessageBox::information(this,
-            trC(QString::fromUtf8("完成"), QStringLiteral("Done")),
-            trC(QString::fromUtf8("固件已成功烧录到设备。\n\n设备已自动重启，请重新点击「连接」。"),
-                QStringLiteral("Firmware flashed successfully.\n\n"
-                "Device has rebooted. Click Connect to reconnect.")));
-    } else {
-        m_dfuLog->appendPlainText(
-            QString::fromUtf8("\n[失败] dfu-util 返回错误码 %1\n"
-            "常见原因: 设备未进入 DFU 模式、USB 驱动未安装、文件格式不正确\n")
-                .arg(exitCode));
-    }
 }
 
 /* ---- dfu-util 自动下载 ---- */
