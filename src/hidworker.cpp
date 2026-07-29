@@ -280,31 +280,21 @@ void HIDWorker::runLoop()
 }
 
 /* ====================================================================
- *  解析 HID 输入数据 — ScanHeader 模式
+ *  解析 HID 输入数据
  *
- *  不依赖 HID Report ID，在收到的数据中扫描 0xFF 协议头，
- *  从 0xFF 处开始解析 AimeIO 数据包。
- *  这样无论设备使用 Report ID 4/5/任意值，上位机都能正确解析。
+ *  HID Report ID 在 buf[0] (可能是 4 或任意值 — 直接跳过),
+ *  AimeIO 协议数据从 buf[1] 开始, 首字节必须是 0xFF。
  * ==================================================================== */
 void HIDWorker::parseInputReport(const uint8_t *buf, int len)
 {
-    if (len < 3) return;
+    if (len < 4) return;           // 至少: ReportID + 0xFF + Cmd + 1 字节
 
-    // 扫描 0xFF 协议头 (AimeIO_Start)
-    int start = -1;
-    for (int i = 0; i < len - 2; ++i) {
-        if (buf[i] == AimeIO_Start) {
-            start = i;
-            break;
-        }
-    }
-    if (start < 0) return;   // 没找到协议头
+    // buf[0] = HID Report ID — 跳过
+    // buf[1] = 必须是 AimeIO_Start (0xFF)
+    if (buf[1] != AimeIO_Start) return;
 
-    const uint8_t *data = buf + start;
-    int dataLen = len - start;
-
-    if (dataLen < 3) return;
-
+    const uint8_t *data = buf + 1;  // 从 0xFF 开始
+    int dataLen = len - 1;
     uint8_t cmd = data[1];
 
     switch (cmd) {
