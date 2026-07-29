@@ -1,5 +1,5 @@
 #!/bin/bash
-# copy-deps.sh — 递归拷贝 MinGW DLL 依赖
+# copy-deps.sh — 递归拷贝 MinGW DLL 依赖 (修复 subshell 问题)
 set -e
 
 EXE="$1"
@@ -14,18 +14,20 @@ fi
 declare -A COPIED
 
 resolve_dll() {
-    local basename
-    basename=$(basename "$1")
-    [ -n "${COPIED[$basename]}" ] && return
+    local basename name
+    basename=$(basename "$1" 2>/dev/null)
+    [ -z "$basename" ] && return
+    name=$(echo "$basename" | tr '[:upper:]' '[:lower:]')
+    [ -n "${COPIED[$name]}" ] && return
 
     local found="$MINGW_BIN/$basename"
-    if [ ! -f "$found" ]; then return; fi  # 系统 DLL, 跳过
+    if [ ! -f "$found" ]; then return; fi  # 系统 DLL
 
     cp "$found" "$DEST/"
-    COPIED[$basename]=1
+    COPIED[$name]=1
     echo "  [COPY] $basename"
 
-    # 递归解析此 DLL 的依赖
+    # 递归
     local dep
     for dep in $(objdump -p "$found" 2>/dev/null | grep "DLL Name:" | awk '{print $3}'); do
         resolve_dll "$dep"
@@ -34,17 +36,29 @@ resolve_dll() {
 
 echo "[DEPS] Resolving dependencies..."
 
-# 1. 解析 EXE 的依赖
+# 1. EXE 的依赖
 for dep in $(objdump -p "$EXE" 2>/dev/null | grep "DLL Name:" | awk '{print $3}'); do
     resolve_dll "$dep"
 done
 
-# 2. 解析 Qt 插件的依赖
-find "$DEST" -name "*.dll" | while read -r plug; do
-    echo "$plug" | grep -q "Monica_NFC_Reader_GUI" && continue
+# 2. 已有 DLL 和插件的依赖 (避免 subshell)
+LIST_FILE=$(mktemp)
+find "$DEST" -name "*.dll" > "$LIST_FILE"
+while IFS= read -r plug; do
+    basename "$plug" | grep -qi "monica" && continue
     for dep in $(objdump -p "$plug" 2>/dev/null | grep "DLL Name:" | awk '{print $3}'); do
         resolve_dll "$dep"
     done
-done
+done < "$LIST_FILE"
+rm -f "$LIST_FILE"
+
+# 3. 第二轮：新拷贝的 DLL 可能还有依赖
+find "$DEST" -name "*.dll" > "$LIST_FILE"
+while IFS= read -r plug; do
+    for dep in $(objdump -p "$plug" 2>/dev/null | grep "DLL Name:" | awk '{print $3}'); do
+        resolve_dll "$dep"
+    done
+done < "$LIST_FILE"
+rm -f "$LIST_FILE"
 
 echo "[DEPS] Done. Copied ${#COPIED[@]} DLLs."
