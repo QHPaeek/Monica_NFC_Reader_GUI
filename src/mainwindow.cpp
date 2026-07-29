@@ -1989,39 +1989,38 @@ void MainWindow::onWriteCardTimeout()
 void MainWindow::doWriteBlock2()
 {
     // 数据 = 6 零 + 10 序列号
-    uint8_t data[16] = {};
-    memcpy(data + 6, m_writeCardSerial.constData(), 10);
+    QByteArray data(16, '\0');
+    memcpy(data.data() + 6, m_writeCardSerial.constData(), 10);
 
-    static const uint8_t blankKey[6] =
-        { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+    QByteArray blankKey(6, '\xFF');
 
     QMetaObject::invokeMethod(m_hid, "requestWriteCard",
         Qt::QueuedConnection,
-        Q_ARG(uint8_t, (uint8_t)0x00),        // sector 0
-        Q_ARG(uint8_t, (uint8_t)0x02),        // block 2
-        Q_ARG(const uint8_t*, blankKey),       // Key A
-        Q_ARG(const uint8_t*, blankKey),       // Key B
-        Q_ARG(const uint8_t*, data));
+        Q_ARG(uint8_t,   (uint8_t)0x00),   // sector 0
+        Q_ARG(uint8_t,   (uint8_t)0x02),   // block 2
+        Q_ARG(QByteArray, blankKey),
+        Q_ARG(QByteArray, blankKey),
+        Q_ARG(QByteArray, data));
 }
 
 void MainWindow::doWriteBlock3()
 {
     // Block 3 = 密钥区 + 访问控制
-    static const uint8_t block3data[16] = {
-        0x57, 0x43, 0x43, 0x46, 0x76, 0x32,  // Key A
-        0xFF, 0x07, 0x80, 0x69,               // Access bits + User
-        0x57, 0x43, 0x43, 0x46, 0x76, 0x32   // Key B
+    static const uint8_t raw[16] = {
+        0x57, 0x43, 0x43, 0x46, 0x76, 0x32,
+        0xFF, 0x07, 0x80, 0x69,
+        0x57, 0x43, 0x43, 0x46, 0x76, 0x32
     };
-    static const uint8_t blankKey[6] =
-        { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+    QByteArray block3data(reinterpret_cast<const char*>(raw), 16);
+    QByteArray blankKey(6, '\xFF');
 
     QMetaObject::invokeMethod(m_hid, "requestWriteCard",
         Qt::QueuedConnection,
-        Q_ARG(uint8_t, (uint8_t)0x00),        // sector 0
-        Q_ARG(uint8_t, (uint8_t)0x03),        // block 3
-        Q_ARG(const uint8_t*, blankKey),       // Key A (当前还是空白密钥)
-        Q_ARG(const uint8_t*, blankKey),       // Key B
-        Q_ARG(const uint8_t*, block3data));
+        Q_ARG(uint8_t,   (uint8_t)0x00),   // sector 0
+        Q_ARG(uint8_t,   (uint8_t)0x03),   // block 3
+        Q_ARG(QByteArray, blankKey),
+        Q_ARG(QByteArray, blankKey),
+        Q_ARG(QByteArray, block3data));
 }
 
 void MainWindow::applyStyleSheet()

@@ -98,8 +98,8 @@ public slots:
     void requestLedColor(uint8_t r, uint8_t g, uint8_t b);
     void requestJumpToDfu();
     void requestWriteCard(uint8_t sector, uint8_t block,
-                          const uint8_t keyA[6], const uint8_t keyB[6],
-                          const uint8_t data[16]);
+                          QByteArray keyA, QByteArray keyB,
+                          QByteArray data);
 
 signals:
     /* 设备／连接状态 */

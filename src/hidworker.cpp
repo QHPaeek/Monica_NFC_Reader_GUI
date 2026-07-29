@@ -199,15 +199,15 @@ void HIDWorker::requestJumpToDfu()
 }
 
 void HIDWorker::requestWriteCard(uint8_t sector, uint8_t block,
-                                  const uint8_t keyA[6], const uint8_t keyB[6],
-                                  const uint8_t data[16])
+                                  QByteArray keyA, QByteArray keyB,
+                                  QByteArray data)
 {
     uint8_t payload[30] = {};
     payload[0] = sector;
     payload[1] = block;
-    memcpy(payload + 2,  keyA, 6);
-    memcpy(payload + 8,  keyB, 6);
-    memcpy(payload + 14, data, 16);
+    memcpy(payload + 2,  keyA.constData(),  qMin(keyA.size(),  6));
+    memcpy(payload + 8,  keyB.constData(),  qMin(keyB.size(),  6));
+    memcpy(payload + 14, data.constData(),  qMin(data.size(), 16));
 
     QByteArray report = buildOutputReport(CMD_Write_Card, payload, 30);
     writeReport(report);
