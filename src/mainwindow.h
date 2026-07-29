@@ -1,0 +1,171 @@
+#ifndef MAINWINDOW_H
+#define MAINWINDOW_H
+
+#include <QMainWindow>
+
+#include <QCheckBox>
+#include <QComboBox>
+#include <QFrame>
+#include <QGridLayout>
+#include <QGroupBox>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QPushButton>
+#include <QSlider>
+#include <QSpinBox>
+#include <QSplitter>
+#include <QStatusBar>
+#include <QTabWidget>
+#include <QTextEdit>
+#include <QTimer>
+#include <QVBoxLayout>
+#include <QByteArray>
+
+#include "flashdata.h"
+#include "hidworker.h"
+
+class MainWindow : public QMainWindow
+{
+    Q_OBJECT
+
+public:
+    explicit MainWindow(QWidget *parent = nullptr);
+    ~MainWindow() override;
+
+private slots:
+    void onConnectClicked();
+    void onDisconnectClicked();
+    void onDeviceConnected(const QString &desc);
+    void onDeviceDisconnected();
+    void onDeviceError(const QString &msg);
+
+    /* 卡片检测 */
+    void onCardDetected(uint8_t cardType, const QByteArray &rawData);
+
+    /* Flash 读写 */
+    void onReadSettings();
+    void onWriteSettings();
+    void onResetDefaults();
+    void onFlashDataRead(const FlashData &data, uint8_t readerType,
+                         uint8_t fwVersion);
+    void onFlashDataWritten(bool ok);
+
+    /* 语言切换 */
+    void onToggleLanguage();
+
+    /* LED */
+    void onLedSliderChanged(int value);
+
+    /* 原始数据日志 */
+    void onRawDataSent(const QByteArray &data);
+    void onRawDataReceived(const QByteArray &data);
+
+private:
+    /* ---- UI 初始化 ---- */
+    void setupUI();
+    void applyStyleSheet();
+    void applyLanguage();
+
+    QWidget* buildHeaderPanel();
+    QWidget* buildCardMonitorPanel();
+    QWidget* buildSettingsPanel();
+    QWidget* createSegaTab();
+    QWidget* createSpiceTab();
+    QWidget* createNamcoTab();
+    QWidget* createSystemTab();
+
+    /* Bit ↔ Checkbox */
+    void    bindCheckboxesToBits(uint8_t byteVal,
+                                 const QCheckBox *const *cbs, int count);
+    uint8_t collectBitsFromCheckboxes(
+                const QCheckBox *const *cbs, int count) const;
+
+    /* FlashData ↔ UI */
+    void     populateSettingsUI(const FlashData &data);
+    FlashData collectSettingsFromUI() const;
+
+    /* 卡片显示 */
+    void showCardInDisplay(const QString &uid, const QString &cardType,
+                           const QString &cardNumber);
+    void clearCardDisplay();
+    void appendLogLine(const QString &prefix, const QString &hex,
+                       const QString &color);
+
+    /* 辅助 */
+    void setControlsEnabled(bool enabled);
+    void updateConnectionUI(bool connected);
+    QString trC(const QString &zh, const QString &en) const;
+
+    /* 卡种信息 */
+    static QString cardTypeName(uint8_t cardType);
+    static QString extractUid(uint8_t cardType, const QByteArray &rawData);
+    static QString extractCardNumber(uint8_t cardType,
+                                     const QByteArray &rawData);
+
+    /* ---- 数据 ---- */
+    HIDWorker  *m_hid;
+    FlashData   m_flashData;
+    bool        m_connected;
+    bool        m_langEn;
+
+    /* ---- Header ---- */
+    QLabel     *m_lblConnStatus;
+    QLabel     *m_lblFwVersion;
+    QLabel     *m_lblConnDot;
+    QLabel     *m_lblReaderModel;
+    QPushButton *m_btnConnect;
+    QPushButton *m_btnDisconnect;
+    QPushButton *m_btnLang;
+
+    /* ---- 卡片监控 ---- */
+    QFrame     *m_cardDisplayFrame;
+    QLabel     *m_lblCardUid;
+    QLabel     *m_lblCardNumber;
+    QLabel     *m_lblCardType;
+    QLabel     *m_lblCardStatus;
+
+    /* ---- 原始数据日志 ---- */
+    QTextEdit  *m_rawLog;
+
+    /* ---- 选项卡 ---- */
+    QTabWidget *m_tabSettings;
+
+    /* SEGA */
+    QCheckBox  *m_sega_tn32;       // BIT0
+    QCheckBox  *m_sega_aic;        // BIT1
+    QCheckBox  *m_sega_nesica;     // BIT3
+    QCheckBox  *m_sega_ea_pass;    // BIT4
+    QCheckBox  *m_sega_tunion;     // BIT5
+    QCheckBox  *m_sega_jubeat;     // BIT6
+
+    /* SPICE */
+    QCheckBox  *m_spice_2p;        // BIT0
+    QCheckBox  *m_spice_aime;      // BIT1
+    QCheckBox  *m_spice_banapass;  // BIT2
+    QCheckBox  *m_spice_nesica;    // BIT3
+    QCheckBox  *m_spice_tunion;    // BIT5
+    QCheckBox  *m_spice_jubeat;    // BIT6
+
+    /* NAMCO */
+    QCheckBox  *m_namco_todo;      // BIT0
+    QCheckBox  *m_namco_aime;      // BIT1
+    QCheckBox  *m_namco_banapass;  // BIT2
+    QCheckBox  *m_namco_nesica;    // BIT3
+    QCheckBox  *m_namco_tunion;    // BIT5
+    QCheckBox  *m_namco_jubeat;    // BIT6
+
+    /* System */
+    QComboBox  *m_cmbUartBaud;
+    QSlider    *m_sldLedBright;
+    QLabel     *m_lblLedValue;
+
+    /* 按钮 */
+    QPushButton *m_btnRead;
+    QPushButton *m_btnWrite;
+    QPushButton *m_btnReset;
+
+    /* 状态栏 */
+    QLabel     *m_lblStatusMsg;
+};
+
+#endif // MAINWINDOW_H
