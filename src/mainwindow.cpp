@@ -152,7 +152,7 @@ QString MainWindow::trC(const QString &zh, const QString &en) const
 
 void MainWindow::setupUI()
 {
-    setWindowTitle(QStringLiteral("NFC Card Reader - Configuration Tool"));
+    setWindowTitle(QStringLiteral("Monica NFC Reader GUI"));
     resize(1100, 750);
     setMinimumSize(900, 600);
 

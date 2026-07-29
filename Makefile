@@ -71,7 +71,7 @@ LIBS += $(LIBS_HID)
 # ---- 路径 ----
 SRC_DIR   := src
 BLD_DIR   := build
-TARGET    := CardReader.exe
+TARGET    := Monica_NFC_Reader_GUI.exe
 
 # ---- 源文件 ----
 CPP_SRCS  := $(wildcard $(SRC_DIR)/*.cpp)
