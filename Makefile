@@ -95,14 +95,17 @@ pack: deploy
 	@echo "[PACK]"
 	cp "/c/Program Files/7-Zip/7z.sfx" deploy/7zS.sfx 2>/dev/null || \
 	cp "/c/Program Files/7-Zip/7zS.sfx" deploy/7zS.sfx 2>/dev/null
-	echo ';!@Install@!UTF-8!' > deploy/config.txt
-	echo 'Title="Monica NFC Reader GUI"' >> deploy/config.txt
-	echo 'BeginPrompt="Install Monica NFC Reader GUI?"' >> deploy/config.txt
-	echo 'InstallPath="Monica NFC Reader"' >> deploy/config.txt
-	echo 'ExtractPathText="Select folder:"' >> deploy/config.txt
-	echo 'ExecuteFile="Monica_NFC_Reader_GUI.exe"' >> deploy/config.txt
-	echo ';!@InstallEnd@!' >> deploy/config.txt
-	cd deploy && "/c/Program Files/7-Zip/7z.exe" a -sfx7zS.sfx ../MonicaNFCReader_Setup.exe * -x!config.txt -x!7zS.sfx > /dev/null
-	rm -f deploy/7zS.sfx deploy/config.txt
+	# 将文件放入子目录归档, 防止解压散落
+	mkdir -p deploy_pack/"Monica NFC Reader"
+	cd deploy && cp -r * ../deploy_pack/"Monica NFC Reader"/ 2>/dev/null || true
+	echo ';!@Install@!UTF-8!' > deploy_pack/config.txt
+	echo 'Title="Monica NFC Reader GUI"' >> deploy_pack/config.txt
+	echo 'BeginPrompt="Install Monica NFC Reader GUI?"' >> deploy_pack/config.txt
+	echo 'ExtractPathText="Select folder:"' >> deploy_pack/config.txt
+	echo 'ExecuteFile="Monica NFC Reader/Monica_NFC_Reader_GUI.exe"' >> deploy_pack/config.txt
+	echo ';!@InstallEnd@!' >> deploy_pack/config.txt
+	cp deploy/7zS.sfx deploy_pack/
+	cd deploy_pack && "/c/Program Files/7-Zip/7z.exe" a -sfx7zS.sfx ../MonicaNFCReader_Setup.exe "Monica NFC Reader" config.txt > /dev/null
+	rm -rf deploy_pack
 	@echo "[PACK] Done → MonicaNFCReader_Setup.exe"
 	@ls -lh MonicaNFCReader_Setup.exe
