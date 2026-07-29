@@ -1,5 +1,7 @@
 <RCC>
-    <qresource prefix="/">
+    <qresource prefix="/dfu">
         <file alias="dfu-util.exe">C:/msys64/mingw64/bin/dfu-util.exe</file>
+        <file alias="libusb-1.0.dll">C:/msys64/mingw64/bin/libusb-1.0.dll</file>
+        <file alias="libwinpthread-1.dll">C:/msys64/mingw64/bin/libwinpthread-1.dll</file>
     </qresource>
 </RCC>

@@ -1268,24 +1268,38 @@ void MainWindow::onDfuCheckTool()
         }
     }
 
-    // 2. 从内置资源释放 dfu-util.exe 到临时目录
+    // 2. 从内置资源释放 dfu-util 及依赖 DLL 到临时目录
     QString tempPath = QStandardPaths::writableLocation(
         QStandardPaths::TempLocation)
         + QStringLiteral("/monica_nfc/dfu-util.exe");
     QDir().mkpath(QFileInfo(tempPath).absolutePath());
 
-    QFile resFile(QStringLiteral(":/dfu-util.exe"));
-    if (resFile.open(QIODevice::ReadOnly)) {
-        QFile outFile(tempPath);
-        if (outFile.open(QIODevice::WriteOnly)) {
+    // 需要释放的文件列表 (资源别名 → 文件名)
+    struct { const char *res; const char *name; } dfuFiles[] = {
+        { ":/dfu/dfu-util.exe",         "dfu-util.exe" },
+        { ":/dfu/libusb-1.0.dll",       "libusb-1.0.dll" },
+        { ":/dfu/libwinpthread-1.dll",  "libwinpthread-1.dll" },
+    };
+    QString dfuDir = QFileInfo(tempPath).absolutePath();
+    bool allOk = true;
+    for (auto &f : dfuFiles) {
+        QFile resFile(QString::fromLatin1(f.res));
+        QFile outFile(dfuDir + QStringLiteral("/") + QString::fromLatin1(f.name));
+        if (resFile.open(QIODevice::ReadOnly)
+            && outFile.open(QIODevice::WriteOnly)) {
             outFile.write(resFile.readAll());
             outFile.close();
-            m_dfuToolPath = tempPath;
-            m_dfuDownloadBtn->setVisible(false);
-            m_dfuLog->appendPlainText(
-                QString::fromUtf8("[OK] dfu-util 已从内置资源释放到 %1\n").arg(tempPath));
-            return;
+        } else {
+            allOk = false;
         }
+    }
+
+    if (allOk) {
+        m_dfuToolPath = tempPath;
+        m_dfuDownloadBtn->setVisible(false);
+        m_dfuLog->appendPlainText(
+            QString::fromUtf8("[OK] dfu-util 已从内置资源释放到 %1\n").arg(dfuDir));
+        return;
     }
 
     // 3. 都没找到 → 显示下载按钮（兜底）

@@ -18,8 +18,7 @@ $(TARGET): MonicaNFCReader.pro $(shell find src -name '*.cpp' -o -name '*.h')
 	sed -i 's/ -lshell32 $$/ -lshell32 -lgraphite2 -lbz2 -lrpcrt4 -Wl,--end-group/' $(BLD)/Makefile.Release
 	@echo "[BUILD] Compiling (8 cores)..."
 	$(MAKE) -C $(BLD) -j8
-	cp $(BLD)/release/$(TARGET) ./$(TARGET) 2>/dev/null || \
-	cp $(BLD)/$(TARGET) ./$(TARGET)
+	cp $(BLD)/release/$(TARGET) ./$(TARGET)
 	@echo "[OK] $(TARGET) — static single file, 0 DLLs needed"
 	@ls -lh $(TARGET)
 
