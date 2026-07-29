@@ -115,6 +115,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_writeCardDialog(nullptr)
     , m_writeCardTimer(nullptr)
     , m_writeCardPending(false)
+    , m_writeCardStep(0)
     , m_btnWriteCardTab(nullptr)
 {
     memset(&m_flashData, 0, sizeof(FlashData));
@@ -1718,14 +1719,9 @@ void MainWindow::onCardDetected(uint8_t cardType, const QByteArray &rawData)
 {
     // 写卡模式下拦截空白卡检测
     if (m_writeCardPending && cardType == Card_Blank_Mifare) {
-        m_writeCardPending = false;
         if (m_writeCardTimer) m_writeCardTimer->stop();
         if (m_writeCardDialog) m_writeCardDialog->accept();
-
-        // 发送写卡命令
-        QMetaObject::invokeMethod(m_hid, "requestWriteCard",
-                                  Qt::QueuedConnection,
-                                  Q_ARG(QByteArray, m_writeCardSerial));
+        doWriteBlock2();
         return;
     }
 
@@ -1918,39 +1914,56 @@ void MainWindow::onWriteCardCancel()
 void MainWindow::onWriteCardResult(uint8_t status)
 {
     if (m_writeCardTimer) m_writeCardTimer->stop();
-    m_writeCardPending = false;
 
+    if (m_writeCardStep == 0) {
+        // Block 2 写完 → 继续写 Block 3
+        if (status == 0x00) {
+            m_writeCardStep = 1;
+            doWriteBlock3();
+        } else {
+            m_writeCardPending = false;
+            showWriteCardError(status);
+        }
+    } else {
+        // Block 3 写完 → 最终结果
+        m_writeCardPending = false;
+        if (status == 0x00) {
+            QMessageBox::information(this,
+                QString::fromUtf8("写入成功"),
+                QString::fromUtf8("卡号与密钥已成功写入！\n\n"
+                "卡片已变为普通 Aime 卡，可正常使用。"));
+        } else {
+            QMessageBox::warning(this,
+                QString::fromUtf8("部分写入失败"),
+                QString::fromUtf8("卡号已写入，但密钥区写入失败。\n"
+                "请重试或更换空白卡。"));
+        }
+    }
+}
+
+void MainWindow::showWriteCardError(uint8_t status)
+{
     switch (status) {
-    case 0x00:  // AimeIO_Write_Status_OK
-        QMessageBox::information(this,
-            QString::fromUtf8("写入成功"),
-            QString::fromUtf8("卡号已成功写入卡片！\n\n"
-            "卡片已变为普通 Aime 卡，可正常使用。"));
-        break;
-    case 0x01:  // AimeIO_Write_Status_No_Find_Card
+    case 0x01:
         QMessageBox::warning(this,
             QString::fromUtf8("写入失败"),
-            QString::fromUtf8("未找到卡片。\n"
-            "请确保空白 MIFARE 卡已放置好。"));
+            QString::fromUtf8("未找到卡片。请确保空白 MIFARE 卡已放置好。"));
         break;
-    case 0x02:  // AimeIO_Write_Status_No_Same_Card
+    case 0x02:
         QMessageBox::warning(this,
             QString::fromUtf8("写入失败"),
-            QString::fromUtf8("检测到的卡片与操作前不一致。\n"
-            "请重新放置同一张空白卡。"));
+            QString::fromUtf8("检测到的卡片与操作前不一致。请重新放置同一张空白卡。"));
         break;
-    case 0x03:  // AimeIO_Write_Status_Wrong_KeyA
-    case 0x04:  // AimeIO_Write_Status_Wrong_KeyB
+    case 0x03:
+    case 0x04:
         QMessageBox::warning(this,
             QString::fromUtf8("写入失败"),
-            QString::fromUtf8("卡片密钥不匹配 (KeyA/KeyB)。\n"
-            "请使用厂制空白 MIFARE 卡。"));
+            QString::fromUtf8("卡片密钥不匹配 (KeyA/KeyB)。请使用厂制空白 MIFARE 卡。"));
         break;
-    case 0x05:  // AimeIO_Write_Status_Write_Failed
+    case 0x05:
         QMessageBox::critical(this,
             QString::fromUtf8("写入失败"),
-            QString::fromUtf8("数据写入失败。\n"
-            "可能是卡片损坏或放置不稳定。"));
+            QString::fromUtf8("数据写入失败。可能是卡片损坏或放置不稳定。"));
         break;
     default:
         QMessageBox::critical(this,
@@ -1965,11 +1978,50 @@ void MainWindow::onWriteCardTimeout()
 {
     if (!m_writeCardPending) return;
     m_writeCardPending = false;
+    m_writeCardStep = 0;
     if (m_writeCardDialog) m_writeCardDialog->reject();
 
     QMessageBox::warning(this,
         QString::fromUtf8("读卡器无响应"),
         QString::fromUtf8("等待超时 (30 秒)，未检测到空白卡片。"));
+}
+
+void MainWindow::doWriteBlock2()
+{
+    // 数据 = 6 零 + 10 序列号
+    uint8_t data[16] = {};
+    memcpy(data + 6, m_writeCardSerial.constData(), 10);
+
+    static const uint8_t blankKey[6] =
+        { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+
+    QMetaObject::invokeMethod(m_hid, "requestWriteCard",
+        Qt::QueuedConnection,
+        Q_ARG(uint8_t, (uint8_t)0x00),        // sector 0
+        Q_ARG(uint8_t, (uint8_t)0x02),        // block 2
+        Q_ARG(const uint8_t*, blankKey),       // Key A
+        Q_ARG(const uint8_t*, blankKey),       // Key B
+        Q_ARG(const uint8_t*, data));
+}
+
+void MainWindow::doWriteBlock3()
+{
+    // Block 3 = 密钥区 + 访问控制
+    static const uint8_t block3data[16] = {
+        0x57, 0x43, 0x43, 0x46, 0x76, 0x32,  // Key A
+        0xFF, 0x07, 0x80, 0x69,               // Access bits + User
+        0x57, 0x43, 0x43, 0x46, 0x76, 0x32   // Key B
+    };
+    static const uint8_t blankKey[6] =
+        { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+
+    QMetaObject::invokeMethod(m_hid, "requestWriteCard",
+        Qt::QueuedConnection,
+        Q_ARG(uint8_t, (uint8_t)0x00),        // sector 0
+        Q_ARG(uint8_t, (uint8_t)0x03),        // block 3
+        Q_ARG(const uint8_t*, blankKey),       // Key A (当前还是空白密钥)
+        Q_ARG(const uint8_t*, blankKey),       // Key B
+        Q_ARG(const uint8_t*, block3data));
 }
 
 void MainWindow::applyStyleSheet()

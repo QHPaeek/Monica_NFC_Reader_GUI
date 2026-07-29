@@ -198,19 +198,16 @@ void HIDWorker::requestJumpToDfu()
     writeReport(report);
 }
 
-void HIDWorker::requestWriteCard(const QByteArray &serial10)
+void HIDWorker::requestWriteCard(uint8_t sector, uint8_t block,
+                                  const uint8_t keyA[6], const uint8_t keyB[6],
+                                  const uint8_t data[16])
 {
-    // 构建写卡载荷: Sector + Block + KeyA[6] + KeyB[6] + Data[16]
-    // 空白 MIFARE 卡默认密钥为 6 个 0xFF
-    if (serial10.size() != 10) return;
-
     uint8_t payload[30] = {};
-    payload[0] = 0x00;                  // Sector 0
-    payload[1] = 0x02;                  // Block 2
-    memset(payload + 2, 0xFF, 6);       // Key A: 6 字节 0xFF
-    memset(payload + 8, 0xFF, 6);       // Key B: 6 字节 0xFF
-    memcpy(payload + 20, serial10.constData(), 10);  // Data: 6 零 + 10 序列号
-    // payload[14..19] already zero from memset
+    payload[0] = sector;
+    payload[1] = block;
+    memcpy(payload + 2,  keyA, 6);
+    memcpy(payload + 8,  keyB, 6);
+    memcpy(payload + 14, data, 16);
 
     QByteArray report = buildOutputReport(CMD_Write_Card, payload, 30);
     writeReport(report);

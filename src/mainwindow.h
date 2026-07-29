@@ -84,6 +84,9 @@ private slots:
     void onWriteCardCancel();
     void onWriteCardResult(uint8_t status);
     void onWriteCardTimeout();
+    void doWriteBlock2();
+    void doWriteBlock3();
+    void showWriteCardError(uint8_t status);
 
 private:
     /* ---- UI 初始化 ---- */
@@ -222,6 +225,7 @@ private:
     QDialog    *m_writeCardDialog;
     QTimer     *m_writeCardTimer;
     bool        m_writeCardPending;
+    int         m_writeCardStep;   // 0=block2, 1=block3
     QByteArray  m_writeCardSerial;
     QPushButton *m_btnWriteCardTab;  // 左侧切换到写卡页的按钮
 };
