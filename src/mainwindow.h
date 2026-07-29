@@ -191,7 +191,8 @@ private:
     QPushButton    *m_dfuFlashBtn;
     QPlainTextEdit *m_dfuLog;
     QProcess       *m_dfuProcess;
-    QString         m_dfuFilePath;
+    QString         m_dfuFilePath;    // 固件文件路径 (.bin/.hex/.dfu)
+    QString         m_dfuToolPath;    // dfu-util.exe 路径
     bool            m_inDfuMode;
 
     /* 网络下载 dfu-util */

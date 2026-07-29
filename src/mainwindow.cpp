@@ -1133,7 +1133,10 @@ void MainWindow::onDfuFlash()
     // Step 1: 列出 DFU 设备
     m_dfuLog->appendPlainText(QString::fromUtf8("正在扫描 DFU 设备...\n"));
 
-    m_dfuProcess->start(QStringLiteral("dfu-util"), {QStringLiteral("-l")});
+    QString dfuExe = m_dfuToolPath.isEmpty()
+        ? QStringLiteral("dfu-util") : m_dfuToolPath;
+
+    m_dfuProcess->start(dfuExe, {QStringLiteral("-l")});
     if (!m_dfuProcess->waitForFinished(3000)) {
         m_dfuLog->appendPlainText(
             QString::fromUtf8("[错误] dfu-util -l 超时\n"));
@@ -1156,7 +1159,7 @@ void MainWindow::onDfuFlash()
 
     // Step 2: 烧录 (带 force 和验证)
     // :force 确保写入, :leave 不复位(后面单独处理复位)
-    QString program = QStringLiteral("dfu-util");
+    QString program = dfuExe;
     QStringList args;
     args << QStringLiteral("-a") << QStringLiteral("0")
          << QStringLiteral("-s") << QStringLiteral("0x08000000:force:unprotect")
@@ -1192,7 +1195,7 @@ void MainWindow::onDfuFlash()
         QString::fromUtf8("\n烧录完成, 正在复位设备...\n"));
     QThread::msleep(500);
     
-    m_dfuProcess->start(QStringLiteral("dfu-util"), {
+    m_dfuProcess->start(dfuExe, {
         QStringLiteral("-a"), QStringLiteral("0"),
         QStringLiteral("-e")  // detach / reset
     });
@@ -1235,7 +1238,7 @@ void MainWindow::onDfuCheckTool()
 
     for (const auto &p : searchPaths) {
         if (QFile::exists(p)) {
-            m_dfuFilePath = p;
+            m_dfuToolPath = p;
             m_dfuDownloadBtn->setVisible(false);
             m_dfuLog->appendPlainText(
                 QString::fromUtf8("[OK] 找到 dfu-util: %1\n").arg(p));
@@ -1354,7 +1357,7 @@ void MainWindow::onDfuDownloadFinished(QNetworkReply *reply)
             .arg(savePath).arg(data.size() / 1024));
 
     m_dfuDownloadBtn->setVisible(false);
-    m_dfuFilePath = savePath;
+    m_dfuToolPath = savePath;
     reply->deleteLater();
 }
 
