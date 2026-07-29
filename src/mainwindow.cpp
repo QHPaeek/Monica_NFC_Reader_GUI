@@ -59,6 +59,38 @@ static QString formatCardNumber(const QString &hex)
     return fmt;
 }
 
+/* 检查 HEX 字符串是否为纯十进制卡号 (不含 A-F) */
+static bool isValidDecimalCardNum(const QString &hex)
+{
+    for (const QChar &c : hex) {
+        if (c >= QLatin1Char('A') && c <= QLatin1Char('F'))
+            return false;
+    }
+    return true;
+}
+
+/* UID → 虚拟卡号 (hex_to_accesscode, 来自 STM32 固件)
+ * 取 8 字节 UID, 转换成 10 字节 access code, 20 位 HEX 显示.
+ */
+static QString uidToAccessCode(const uint8_t *uid8)
+{
+    uint8_t ac[10];
+    ac[0] = 0x00;
+    ac[1] = 0x00;
+    memcpy(ac + 2, uid8, 8);
+    for (int i = 0; i < 8; ++i) {
+        uint8_t hi = (uid8[i] >> 4);
+        uint8_t lo = (uid8[i] & 0x0F);
+        if (hi >= 10) hi -= 7;
+        if (lo >= 10) lo -= 7;
+        ac[i + 2] = (hi << 4) | lo;
+    }
+    QString hex;
+    for (int i = 0; i < 10; ++i)
+        hex.append(QStringLiteral("%1").arg(ac[i], 2, 16, QLatin1Char('0')));
+    return formatCardNumber(hex.toUpper());
+}
+
 // ====================================================================
 //  构造 & 析构
 // ====================================================================
@@ -68,6 +100,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_hid(new HIDWorker(nullptr))
     , m_connected(false)
     , m_langEn(false)
+    , m_inDfuMode(false)
 {
     memset(&m_flashData, 0, sizeof(FlashData));
 
@@ -132,7 +165,11 @@ void MainWindow::setupUI()
     splitter->setHandleWidth(1);
     splitter->setChildrenCollapsible(false);
     splitter->addWidget(buildCardMonitorPanel());
-    splitter->addWidget(buildSettingsPanel());
+    m_stackedRight = new QStackedWidget(central);
+    m_stackedRight->addWidget(buildSettingsPanel());
+    m_stackedRight->addWidget(buildDfuPage());
+    m_stackedRight->setCurrentIndex(0);
+    splitter->addWidget(m_stackedRight);
     splitter->setStretchFactor(0, 2);
     splitter->setStretchFactor(1, 3);
     splitter->setSizes({420, 680});
@@ -192,6 +229,12 @@ QWidget* MainWindow::buildHeaderPanel()
     connect(m_btnLang,       &QPushButton::clicked,
             this, &MainWindow::onToggleLanguage);
 
+    m_btnDfu = new QPushButton(QStringLiteral("DFU"));
+    m_btnDfu->setObjectName(QStringLiteral("btnDfu"));
+    m_btnDfu->setToolTip(QString::fromUtf8("跳转到固件升级模式"));
+    connect(m_btnDfu, &QPushButton::clicked,
+            this, &MainWindow::onJumpToDfu);
+
     hbox->addWidget(title);
     hbox->addStretch();
     hbox->addWidget(m_lblReaderModel);
@@ -202,6 +245,8 @@ QWidget* MainWindow::buildHeaderPanel()
     hbox->addWidget(m_lblFwVersion);
     hbox->addStretch();
     hbox->addWidget(m_btnLang);
+    hbox->addSpacing(8);
+    hbox->addWidget(m_btnDfu);
     hbox->addSpacing(8);
     hbox->addWidget(m_btnConnect);
     hbox->addWidget(m_btnDisconnect);
@@ -323,6 +368,80 @@ QWidget* MainWindow::buildSettingsPanel()
     vbox->addLayout(btnRow);
 
     return panel;
+}
+
+/* ---- DFU 固件升级页面 ---- */
+QWidget* MainWindow::buildDfuPage()
+{
+    QWidget *w = new QWidget(this);
+    w->setObjectName(QStringLiteral("dfuPage"));
+    QVBoxLayout *vbox = new QVBoxLayout(w);
+    vbox->setContentsMargins(24, 24, 24, 24);
+    vbox->setSpacing(16);
+
+    QLabel *title = new QLabel(QString::fromUtf8("DFU 固件升级"));
+    title->setObjectName(QStringLiteral("sectionTitle"));
+    QLabel *desc  = new QLabel(QString::fromUtf8(
+        "读卡器已进入 DFU 模式。选择固件文件并烧录到 STM32F072。\n"
+        "支持格式: .bin / .hex / .dfu"));
+    desc->setObjectName(QStringLiteral("tabDesc"));
+    desc->setWordWrap(true);
+
+    // 文件选择行
+    QHBoxLayout *fileRow = new QHBoxLayout();
+    m_dfuFileEdit = new QLineEdit(w);
+    m_dfuFileEdit->setObjectName(QStringLiteral("dfuFileEdit"));
+    m_dfuFileEdit->setPlaceholderText(
+        QString::fromUtf8("选择固件文件 (.bin/.hex/.dfu) ..."));
+    m_dfuFileEdit->setReadOnly(true);
+
+    m_dfuBrowseBtn = new QPushButton(QString::fromUtf8("浏览..."), w);
+    m_dfuBrowseBtn->setObjectName(QStringLiteral("btnSecondary"));
+    connect(m_dfuBrowseBtn, &QPushButton::clicked,
+            this, &MainWindow::onDfuFileBrowse);
+
+    fileRow->addWidget(m_dfuFileEdit, 1);
+    fileRow->addWidget(m_dfuBrowseBtn);
+
+    // 目标信息
+    QLabel *targetLabel = new QLabel(
+        QStringLiteral("Target: STM32F072  @  0x08000000"), w);
+    targetLabel->setObjectName(QStringLiteral("tabDesc"));
+
+    // 烧录按钮
+    m_dfuFlashBtn = new QPushButton(QString::fromUtf8("烧录固件"), w);
+    m_dfuFlashBtn->setObjectName(QStringLiteral("btnPrimary"));
+    m_dfuFlashBtn->setEnabled(false);
+    connect(m_dfuFlashBtn, &QPushButton::clicked,
+            this, &MainWindow::onDfuFlash);
+
+    // 日志输出
+    m_dfuLog = new QPlainTextEdit(w);
+    m_dfuLog->setObjectName(QStringLiteral("dfuLog"));
+    m_dfuLog->setReadOnly(true);
+    m_dfuLog->setMaximumBlockCount(200);
+    m_dfuLog->setStyleSheet(
+        QStringLiteral("QPlainTextEdit { background:#1E1E2E; color:#CCCCCC; "
+                       "font-family:Consolas,monospace; font-size:12px; }"));
+
+    // QProcess
+    m_dfuProcess = new QProcess(this);
+    connect(m_dfuProcess, &QProcess::readyReadStandardOutput,
+            this, &MainWindow::onDfuProcessOutput);
+    connect(m_dfuProcess, &QProcess::readyReadStandardError,
+            this, &MainWindow::onDfuProcessOutput);
+    connect(m_dfuProcess,
+            QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, &MainWindow::onDfuProcessFinished);
+
+    vbox->addWidget(title);
+    vbox->addWidget(desc);
+    vbox->addLayout(fileRow);
+    vbox->addWidget(targetLabel);
+    vbox->addWidget(m_dfuFlashBtn);
+    vbox->addWidget(m_dfuLog, 1);
+
+    return w;
 }
 
 static QCheckBox* makeCheckBox(const QString &text, QWidget *parent)
@@ -736,17 +855,24 @@ QString MainWindow::extractCardNumber(uint8_t cardType,
             uint8_t spad[16];
             memcpy(spad, rawData.constData() + 16, 16);
             decryptAicAccessCode(spad);
-            // 去掉前导零字节, 取后面有效部分
+            // 去掉前导零
             int start = 0;
             while (start < 16 && spad[start] == 0x00)
                 ++start;
             int validLen = 16 - start;
-            if (validLen <= 0) return QString();
-            QString hex;
-            for (int i = start; i < 16; ++i)
-                hex.append(QStringLiteral("%1")
-                    .arg(spad[i], 2, 16, QLatin1Char('0')));
-            return formatCardNumber(hex.toUpper());
+            if (validLen > 0) {
+                QString hex;
+                for (int i = start; i < 16; ++i)
+                    hex.append(QStringLiteral("%1")
+                        .arg(spad[i], 2, 16, QLatin1Char('0')));
+                // 前导零必须 >= 6 字节 (12 hex 字符), 且卡号必须是纯十进制
+                if (start >= 6 && isValidDecimalCardNum(hex))
+                    return formatCardNumber(hex.toUpper());
+            }
+            // 不合格 → 用 UID 构造虚拟卡号
+            if (rawData.size() >= 8)
+                return uidToAccessCode(
+                    reinterpret_cast<const uint8_t*>(rawData.constData()));
         }
         break;
     case Card_EPass:
@@ -821,6 +947,8 @@ void MainWindow::clearCardDisplay()
 
 void MainWindow::onConnectClicked()
 {
+    m_stackedRight->setCurrentIndex(0);  // 切换回设置页
+    m_btnDfu->show();
     m_lblStatusMsg->setText(trC(
         QStringLiteral("正在搜索设备..."),
         QStringLiteral("Searching for device...")));
@@ -929,6 +1057,103 @@ void MainWindow::appendLogLine(const QString &prefix, const QString &hex,
     // 自动滚到底部
     auto *sb = m_rawLog->verticalScrollBar();
     if (sb) sb->setValue(sb->maximum());
+}
+
+/* ====================================================================
+ *  DFU 相关槽
+ * ==================================================================== */
+
+void MainWindow::onJumpToDfu()
+{
+    if (!m_connected) {
+        QMessageBox::information(this,
+            trC(QString::fromUtf8("提示"), QStringLiteral("Info")),
+            trC(QString::fromUtf8("请先连接设备再使用 DFU 功能。"),
+                QStringLiteral("Please connect the device first.")));
+        return;
+    }
+
+    auto result = QMessageBox::question(this,
+        trC(QString::fromUtf8("跳转 DFU"),
+            QStringLiteral("Jump to DFU")),
+        trC(QString::fromUtf8(
+            "读卡器将断开连接并进入 DFU 固件升级模式。\n确定继续？"),
+            QStringLiteral(
+            "The reader will disconnect and enter DFU mode.\nContinue?")),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+
+    if (result != QMessageBox::Yes) return;
+
+    m_inDfuMode = true;
+    m_lblStatusMsg->setText(trC(
+        QString::fromUtf8("正在请求跳转 DFU..."),
+        QStringLiteral("Requesting DFU jump...")));
+    m_hid->requestJumpToDfu();
+}
+
+void MainWindow::onDfuFileBrowse()
+{
+    QString path = QFileDialog::getOpenFileName(this,
+        trC(QString::fromUtf8("选择固件文件"),
+            QStringLiteral("Select Firmware File")),
+        QString(),
+        QStringLiteral("Firmware Files (*.bin *.hex *.dfu);;All Files (*)"));
+    if (!path.isEmpty()) {
+        m_dfuFilePath = path;
+        m_dfuFileEdit->setText(path);
+        m_dfuFlashBtn->setEnabled(true);
+    }
+}
+
+void MainWindow::onDfuFlash()
+{
+    if (m_dfuFilePath.isEmpty()) return;
+
+    m_dfuFlashBtn->setEnabled(false);
+    m_dfuLog->clear();
+
+    QString program = QStringLiteral("dfu-util");
+    QStringList args;
+    args << QStringLiteral("-a") << QStringLiteral("0")
+         << QStringLiteral("-s") << QStringLiteral("0x08000000:leave")
+         << QStringLiteral("-D") << m_dfuFilePath;
+
+    m_dfuLog->appendPlainText(
+        QStringLiteral("$ dfu-util %1\n").arg(args.join(QLatin1Char(' '))));
+
+    m_dfuProcess->start(program, args);
+    if (!m_dfuProcess->waitForStarted(3000)) {
+        m_dfuLog->appendPlainText(
+            QString::fromUtf8("[错误] 无法启动 dfu-util。\n"
+            "请确认已安装: pacman -S mingw-w64-x86_64-dfu-util\n"));
+        m_dfuFlashBtn->setEnabled(true);
+    }
+}
+
+void MainWindow::onDfuProcessOutput()
+{
+    QByteArray out = m_dfuProcess->readAllStandardOutput();
+    QByteArray err = m_dfuProcess->readAllStandardError();
+    if (!out.isEmpty())
+        m_dfuLog->appendPlainText(QString::fromUtf8(out));
+    if (!err.isEmpty())
+        m_dfuLog->appendPlainText(QString::fromUtf8(err));
+}
+
+void MainWindow::onDfuProcessFinished(int exitCode)
+{
+    m_dfuFlashBtn->setEnabled(true);
+    if (exitCode == 0) {
+        m_dfuLog->appendPlainText(
+            QString::fromUtf8("\n[成功] 固件烧录完成！\n"));
+        QMessageBox::information(this,
+            trC(QString::fromUtf8("完成"), QStringLiteral("Done")),
+            trC(QString::fromUtf8("固件已成功烧录到设备。"),
+                QStringLiteral("Firmware flashed successfully.")));
+    } else {
+        m_dfuLog->appendPlainText(
+            QString::fromUtf8("\n[失败] dfu-util 返回错误码 %1\n").arg(exitCode));
+    }
 }
 
 void MainWindow::onToggleLanguage()
@@ -1069,13 +1294,24 @@ void MainWindow::onDeviceDisconnected()
     m_connected = false;
     m_btnConnect->setEnabled(true);
     updateConnectionUI(false);
-    setControlsEnabled(false);
     clearCardDisplay();
     m_lblFwVersion->setText(QStringLiteral("FW: --"));
     m_lblReaderModel->hide();
-    m_lblStatusMsg->setText(trC(
-        QStringLiteral("设备已断开"),
-        QStringLiteral("Device disconnected")));
+
+    if (m_inDfuMode) {
+        m_inDfuMode = false;
+        setControlsEnabled(false);
+        m_stackedRight->setCurrentIndex(1);  // 切换到 DFU 页面
+        m_btnDfu->hide();
+        m_lblStatusMsg->setText(trC(
+            QString::fromUtf8("设备已进入 DFU 模式，请选择固件文件烧录。"),
+            QStringLiteral("Device entered DFU mode. Select firmware to flash.")));
+    } else {
+        setControlsEnabled(false);
+        m_lblStatusMsg->setText(trC(
+            QStringLiteral("设备已断开"),
+            QStringLiteral("Device disconnected")));
+    }
 }
 
 void MainWindow::onDeviceError(const QString &msg)

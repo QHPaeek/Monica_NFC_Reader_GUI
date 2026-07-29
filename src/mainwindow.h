@@ -19,7 +19,12 @@
 #include <QTextEdit>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QProcess>
 #include <QByteArray>
+#include <QLineEdit>
+#include <QPlainTextEdit>
+#include <QStackedWidget>
+#include <QFileDialog>
 
 #include "flashdata.h"
 #include "hidworker.h"
@@ -60,6 +65,13 @@ private slots:
     void onRawDataSent(const QByteArray &data);
     void onRawDataReceived(const QByteArray &data);
 
+    /* DFU */
+    void onJumpToDfu();
+    void onDfuFileBrowse();
+    void onDfuFlash();
+    void onDfuProcessOutput();
+    void onDfuProcessFinished(int exitCode);
+
 private:
     /* ---- UI 初始化 ---- */
     void setupUI();
@@ -69,6 +81,7 @@ private:
     QWidget* buildHeaderPanel();
     QWidget* buildCardMonitorPanel();
     QWidget* buildSettingsPanel();
+    QWidget* buildDfuPage();
     QWidget* createSegaTab();
     QWidget* createSpiceTab();
     QWidget* createNamcoTab();
@@ -162,6 +175,20 @@ private:
     QPushButton *m_btnRead;
     QPushButton *m_btnWrite;
     QPushButton *m_btnReset;
+    QPushButton *m_btnDfu;
+
+    /* 右侧内容栈 (设置 / DFU) */
+    QStackedWidget *m_stackedRight;
+    QWidget        *m_dfuPage;
+
+    /* DFU 页面 */
+    QLineEdit      *m_dfuFileEdit;
+    QPushButton    *m_dfuBrowseBtn;
+    QPushButton    *m_dfuFlashBtn;
+    QPlainTextEdit *m_dfuLog;
+    QProcess       *m_dfuProcess;
+    QString         m_dfuFilePath;
+    bool            m_inDfuMode;
 
     /* 状态栏 */
     QLabel     *m_lblStatusMsg;
