@@ -41,6 +41,7 @@ enum AimeIOCmd : uint8_t {
 };
 
 enum AimeIOCardType : uint8_t {
+    Card_None          = 0x00,
     Card_Aime          = 0x01,
     Card_Bana_New      = 0x02,
     Card_Bana_Old      = 0x03,

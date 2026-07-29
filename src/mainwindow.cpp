@@ -770,6 +770,7 @@ void MainWindow::updateConnectionUI(bool connected)
 QString MainWindow::cardTypeName(uint8_t cardType)
 {
     switch (cardType) {
+        case Card_None:          return QStringLiteral("(no card)");
         case Card_Aime:          return QStringLiteral("Aime (MIFARE)");
         case Card_Bana_New:      return QStringLiteral("Banapass (New)");
         case Card_Bana_Old:      return QStringLiteral("Banapass (Old)");
@@ -1542,6 +1543,14 @@ void MainWindow::onDeviceError(const QString &msg)
 
 void MainWindow::onCardDetected(uint8_t cardType, const QByteArray &rawData)
 {
+    if (cardType == Card_None) {
+        clearCardDisplay();
+        m_lblStatusMsg->setText(trC(
+            QString::fromUtf8("未检测到卡片"),
+            QStringLiteral("No card detected")));
+        return;
+    }
+
     QString uid        = extractUid(cardType, rawData);
     QString typeName   = cardTypeName(cardType);
     QString cardNumber = extractCardNumber(cardType, rawData);
