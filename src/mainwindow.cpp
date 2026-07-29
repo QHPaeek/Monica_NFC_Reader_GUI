@@ -1162,7 +1162,7 @@ void MainWindow::onDfuFlash()
     QString program = dfuExe;
     QStringList args;
     args << QStringLiteral("-a") << QStringLiteral("0")
-         << QStringLiteral("-s") << QStringLiteral("0x08000000:force:unprotect")
+         << QStringLiteral("-s") << QStringLiteral("0x08000000:leave")
          << QStringLiteral("-D") << m_dfuFilePath;
 
     m_dfuLog->appendPlainText(
