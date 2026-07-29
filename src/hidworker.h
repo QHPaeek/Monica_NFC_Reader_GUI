@@ -113,7 +113,7 @@ signals:
     void flashDataRead(const FlashData &data, uint8_t readerType,
                        uint8_t fwVersion);
     void flashDataWritten(bool success);
-    void writeCardResult(bool success);
+    void writeCardResult(uint8_t status);
 
     /* 原始数据监控 — 不做协议解析, 供 GUI 日志窗口使用 */
     void rawDataSent(const QByteArray &report);

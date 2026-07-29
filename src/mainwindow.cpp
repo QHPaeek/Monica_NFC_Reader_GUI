@@ -1915,22 +1915,49 @@ void MainWindow::onWriteCardCancel()
     if (m_writeCardDialog) m_writeCardDialog->reject();
 }
 
-void MainWindow::onWriteCardResult(bool success)
+void MainWindow::onWriteCardResult(uint8_t status)
 {
     if (m_writeCardTimer) m_writeCardTimer->stop();
     m_writeCardPending = false;
 
-    if (success) {
+    switch (status) {
+    case 0x00:  // AimeIO_Write_Status_OK
         QMessageBox::information(this,
             QString::fromUtf8("写入成功"),
             QString::fromUtf8("卡号已成功写入卡片！\n\n"
             "卡片已变为普通 Aime 卡，可正常使用。"));
-    } else {
+        break;
+    case 0x01:  // AimeIO_Write_Status_No_Find_Card
+        QMessageBox::warning(this,
+            QString::fromUtf8("写入失败"),
+            QString::fromUtf8("未找到卡片。\n"
+            "请确保空白 MIFARE 卡已放置好。"));
+        break;
+    case 0x02:  // AimeIO_Write_Status_No_Same_Card
+        QMessageBox::warning(this,
+            QString::fromUtf8("写入失败"),
+            QString::fromUtf8("检测到的卡片与操作前不一致。\n"
+            "请重新放置同一张空白卡。"));
+        break;
+    case 0x03:  // AimeIO_Write_Status_Wrong_KeyA
+    case 0x04:  // AimeIO_Write_Status_Wrong_KeyB
+        QMessageBox::warning(this,
+            QString::fromUtf8("写入失败"),
+            QString::fromUtf8("卡片密钥不匹配 (KeyA/KeyB)。\n"
+            "请使用厂制空白 MIFARE 卡。"));
+        break;
+    case 0x05:  // AimeIO_Write_Status_Write_Failed
         QMessageBox::critical(this,
             QString::fromUtf8("写入失败"),
-            QString::fromUtf8("卡号写入失败。\n\n"
-            "可能原因：卡片不是空白 MIFARE 卡、\n"
-            "卡片放置不稳定或读卡器异常。"));
+            QString::fromUtf8("数据写入失败。\n"
+            "可能是卡片损坏或放置不稳定。"));
+        break;
+    default:
+        QMessageBox::critical(this,
+            QString::fromUtf8("写入失败"),
+            QString::fromUtf8("读卡器返回未知错误 (0x%1)。")
+                .arg(status, 2, 16, QLatin1Char('0')));
+        break;
     }
 }
 

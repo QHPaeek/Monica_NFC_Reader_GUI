@@ -200,9 +200,11 @@ void HIDWorker::requestJumpToDfu()
 
 void HIDWorker::requestWriteCard(const QByteArray &serial10)
 {
+    // 6 字节零 + 10 字节序列号 = 16 字节
     if (serial10.size() != 10) return;
-    QByteArray report = buildOutputReport(CMD_Write_Card,
-        reinterpret_cast<const uint8_t*>(serial10.constData()), 10);
+    uint8_t payload[16] = {};
+    memcpy(payload + 6, serial10.constData(), 10);
+    QByteArray report = buildOutputReport(CMD_Write_Card, payload, 16);
     writeReport(report);
 }
 
@@ -344,8 +346,8 @@ void HIDWorker::parseInputReport(const uint8_t *buf, int len)
     }
 
     case CMD_Write_Card:
-        // data[2] = status: 0x01=成功, 0x02=失败
-        emit writeCardResult(dataLen >= 3 && data[2] == 0x01);
+        // data[2] = status (协议定义的多种状态)
+        emit writeCardResult(dataLen >= 3 ? data[2] : 0xFF);
         break;
     case CMD_JUMP2DFU:
         // 确认包，无需额外处理

@@ -82,7 +82,7 @@ private slots:
     /* 写 Aime 卡 */
     void onWriteCardClicked();
     void onWriteCardCancel();
-    void onWriteCardResult(bool success);
+    void onWriteCardResult(uint8_t status);
     void onWriteCardTimeout();
 
 private:
