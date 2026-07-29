@@ -1231,12 +1231,7 @@ void MainWindow::onDfuResetFinished(int, QProcess::ExitStatus)
 /* ---- dfu-util 自动下载 ---- */
 
 static const QStringList g_dfuMirrors = {
-    // 优先 Gitee 镜像 (国内快)
-    QStringLiteral("https://gitee.com/qinh/dfu-util-win64/raw/master/dfu-util.exe"),
-    // GitHub 原始文件
-    QStringLiteral("https://github.com/qinh/dfu-util-win64/raw/master/dfu-util.exe"),
-    // SourceForge 官方
-    QStringLiteral("https://downloads.sourceforge.net/project/dfu-util/dfu-util-0.11/dfu-util-0.11-binaries/win32-mingw32/dfu-util.exe"),
+    QStringLiteral("https://gitee.com/Reimages/dfu-util/releases/download/v0.1/dfu-util.exe"),
 };
 static int g_dfuMirrorIdx = 0;
 
