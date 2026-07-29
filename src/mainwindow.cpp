@@ -736,9 +736,14 @@ QString MainWindow::extractCardNumber(uint8_t cardType,
             uint8_t spad[16];
             memcpy(spad, rawData.constData() + 16, 16);
             decryptAicAccessCode(spad);
-            // 解密后显示为 HEX 卡号 (32 字符)
+            // 去掉前导零字节, 取后面有效部分
+            int start = 0;
+            while (start < 16 && spad[start] == 0x00)
+                ++start;
+            int validLen = 16 - start;
+            if (validLen <= 0) return QString();
             QString hex;
-            for (int i = 0; i < 16; ++i)
+            for (int i = start; i < 16; ++i)
                 hex.append(QStringLiteral("%1")
                     .arg(spad[i], 2, 16, QLatin1Char('0')));
             return formatCardNumber(hex.toUpper());
