@@ -142,6 +142,20 @@ deploy: $(TARGET)
 	cp /c/msys64/mingw64/bin/libgcc_s_seh-1.dll deploy/
 	@echo "[DEPLOY] Done → deploy/ folder"
 
+pack: deploy
+	@echo "[PACK] Creating single EXE..."
+	cp "/c/Program Files/7-Zip/7z.sfx" deploy/7zS.sfx 2>/dev/null || \
+	cp "/c/Program Files/7-Zip/7zS.sfx" deploy/7zS.sfx 2>/dev/null
+	echo ';!@Install@!UTF-8!' > deploy/config.txt
+	echo 'Title="Monica NFC Reader GUI"' >> deploy/config.txt
+	echo 'BeginPrompt="Install Monica NFC Reader GUI?"' >> deploy/config.txt
+	echo 'ExtractPathText="Select folder:"' >> deploy/config.txt
+	echo 'ExecuteFile="Monica_NFC_Reader_GUI.exe"' >> deploy/config.txt
+	echo ';!@InstallEnd@!' >> deploy/config.txt
+	cd deploy && "/c/Program Files/7-Zip/7z.exe" a -sfx7zS.sfx ../MonicaNFCReader_Setup.exe Monica_NFC_Reader_GUI.exe Qt6Core.dll Qt6Gui.dll Qt6Network.dll Qt6Widgets.dll libhidapi-0.dll libwinpthread-1.dll libstdc++-6.dll libgcc_s_seh-1.dll generic/ imageformats/ networkinformation/ platforms/ styles/ tls/ config.txt > /dev/null
+	rm -f deploy/7zS.sfx deploy/config.txt
+	@echo "[PACK] Done → MonicaNFCReader_Setup.exe"
+
 # 打印诊断信息
 info:
 	@echo "Qt6 detected: $(IS_QT6)"

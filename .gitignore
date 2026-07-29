@@ -3,3 +3,4 @@ build/
 .workbuddy/
 *.o
 deploy/
+MonicaNFCReader_Setup.exe
