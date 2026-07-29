@@ -1423,6 +1423,12 @@ void MainWindow::applyStyleSheet()
         }
         QPushButton#btnLang:hover { background-color: #E8E8E8; }
 
+        QPushButton#btnDfu {
+            background-color: #FF8C00; color: #FFFFFF; border: none;
+            border-radius: 4px; padding: 6px 16px; font-weight: 600; min-height: 30px;
+        }
+        QPushButton#btnDfu:hover { background-color: #E67E00; }
+
         QPushButton#btnConnect {
             background-color: #0078D4; color: #FFFFFF; border: none;
             border-radius: 4px; padding: 6px 20px; font-weight: 500; min-height: 30px;
