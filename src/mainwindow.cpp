@@ -725,13 +725,18 @@ void MainWindow::showCardInDisplay(const QString &uid, const QString &cardType,
     m_lblCardUid->style()->unpolish(m_lblCardUid);
     m_lblCardUid->style()->polish(m_lblCardUid);
 
-    // 卡号: 大字金色, 主要显示
+    // 卡号: 大字金色, 主要显示 (无卡号时显示占位符)
     if (!cardNumber.isEmpty()) {
         m_lblCardNumber->setText(cardNumber);
-        m_lblCardNumber->show();
+        m_lblCardNumber->setProperty("placeholder", false);
     } else {
-        m_lblCardNumber->hide();
+        m_lblCardNumber->setText(
+            QStringLiteral("---- ---- ---- ---- ----"));
+        m_lblCardNumber->setProperty("placeholder", true);
     }
+    m_lblCardNumber->style()->unpolish(m_lblCardNumber);
+    m_lblCardNumber->style()->polish(m_lblCardNumber);
+    m_lblCardNumber->show();
 
     m_lblCardType->setText(cardType);
     m_lblCardType->show();
@@ -1151,6 +1156,9 @@ void MainWindow::applyStyleSheet()
         QLabel#cardNumberLabel {
             color: #FFD54F; font-family: "Cascadia Code", "Consolas", monospace;
             font-size: 22px; font-weight: 700; letter-spacing: 2px; padding: 6px 0;
+        }
+        QLabel#cardNumberLabel[placeholder="true"] {
+            color: #4A4A6A; font-weight: 400;
         }
         QLabel#cardTypeLabel { color: #82B1FF; font-size: 12px; font-weight: 600; }
 
