@@ -122,7 +122,6 @@ private:
     QLabel     *m_lblCardUid;
     QLabel     *m_lblCardNumber;
     QLabel     *m_lblCardType;
-    QLabel     *m_lblCardStatus;
 
     /* ---- 原始数据日志 ---- */
     QTextEdit  *m_rawLog;

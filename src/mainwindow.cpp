@@ -180,7 +180,7 @@ QWidget* MainWindow::buildCardMonitorPanel()
     displayLayout->setAlignment(Qt::AlignCenter);
     displayLayout->setSpacing(6);
 
-    QLabel *uidTitle = new QLabel(QStringLiteral("CARD UID"));
+    QLabel *uidTitle = new QLabel(QStringLiteral("CARD NUMBER"));
     uidTitle->setObjectName(QStringLiteral("cardUidTitle"));
 
     m_lblCardUid = new QLabel(QStringLiteral("Waiting for card..."));
@@ -199,15 +199,10 @@ QWidget* MainWindow::buildCardMonitorPanel()
     m_lblCardType->setAlignment(Qt::AlignCenter);
     m_lblCardType->hide();
 
-    m_lblCardStatus = new QLabel(this);
-    m_lblCardStatus->setObjectName(QStringLiteral("cardStatusLabel"));
-    m_lblCardStatus->setAlignment(Qt::AlignCenter);
-
     displayLayout->addWidget(uidTitle);
-    displayLayout->addWidget(m_lblCardUid);
     displayLayout->addWidget(m_lblCardNumber);
+    displayLayout->addWidget(m_lblCardUid);
     displayLayout->addWidget(m_lblCardType);
-    displayLayout->addWidget(m_lblCardStatus);
 
     vbox->addWidget(m_cardDisplayFrame);
 
@@ -703,26 +698,36 @@ QString MainWindow::extractCardNumber(uint8_t cardType,
 
     if (offset + len > rawData.size()) return QString();
 
-    // HEX → ASCII 卡号
-    QString cardNum;
+    // 原始字节 → HEX 字符串 (每字节 = 2 个 HEX 字符)
+    QString hex;
     for (int i = 0; i < len; ++i) {
-        cardNum.append(QChar(static_cast<char>(rawData[offset + i])));
+        hex.append(QStringLiteral("%1")
+            .arg(static_cast<uint8_t>(rawData[offset + i]), 2, 16,
+                 QLatin1Char('0')));
     }
-    return cardNum.trimmed();
+
+    // 每 4 个字符插入一个空格: "1111222233334444" → "1111 2222 3333 4444"
+    QString formatted;
+    for (int i = 0; i < hex.length(); ++i) {
+        if (i > 0 && i % 4 == 0)
+            formatted.append(QLatin1Char(' '));
+        formatted.append(hex.at(i));
+    }
+    return formatted.toUpper();
 }
 
 void MainWindow::showCardInDisplay(const QString &uid, const QString &cardType,
                                    const QString &cardNumber)
 {
+    // UID: 小字灰色
     m_lblCardUid->setText(uid);
     m_lblCardUid->setProperty("hasCard", true);
     m_lblCardUid->style()->unpolish(m_lblCardUid);
     m_lblCardUid->style()->polish(m_lblCardUid);
 
+    // 卡号: 大字金色, 主要显示
     if (!cardNumber.isEmpty()) {
-        m_lblCardNumber->setText(trC(
-            QStringLiteral("卡号: ") + cardNumber,
-            QStringLiteral("Card #: ") + cardNumber));
+        m_lblCardNumber->setText(cardNumber);
         m_lblCardNumber->show();
     } else {
         m_lblCardNumber->hide();
@@ -730,13 +735,6 @@ void MainWindow::showCardInDisplay(const QString &uid, const QString &cardType,
 
     m_lblCardType->setText(cardType);
     m_lblCardType->show();
-
-    m_lblCardStatus->setText(
-        trC(QString::fromUtf8("检测时间: ") +
-                QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")),
-            QStringLiteral("Detected: ") +
-                QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss"))));
-    m_lblCardStatus->show();
 }
 
 void MainWindow::clearCardDisplay()
@@ -750,7 +748,6 @@ void MainWindow::clearCardDisplay()
 
     m_lblCardNumber->hide();
     m_lblCardType->hide();
-    m_lblCardStatus->hide();
 }
 
 // ====================================================================
@@ -1147,16 +1144,15 @@ void MainWindow::applyStyleSheet()
             color: #7C7C9A; font-size: 11px; font-weight: 600; letter-spacing: 2px;
         }
         QLabel#cardUidValue {
-            color: #616177; font-family: "Cascadia Code", "Consolas", monospace;
-            font-size: 24px; font-weight: 700; letter-spacing: 2px; padding: 6px 0;
+            color: #9090A0; font-family: "Cascadia Code", "Consolas", monospace;
+            font-size: 15px; font-weight: 500; letter-spacing: 1px; padding: 4px 0;
         }
-        QLabel#cardUidValue[hasCard="true"] { color: #00E676; }
+        QLabel#cardUidValue[hasCard="true"] { color: #9090A0; }
         QLabel#cardNumberLabel {
             color: #FFD54F; font-family: "Cascadia Code", "Consolas", monospace;
-            font-size: 13px; font-weight: 600;
+            font-size: 22px; font-weight: 700; letter-spacing: 2px; padding: 6px 0;
         }
-        QLabel#cardTypeLabel { color: #82B1FF; font-size: 13px; font-weight: 600; }
-        QLabel#cardStatusLabel { color: #7C7C9A; font-size: 11px; }
+        QLabel#cardTypeLabel { color: #82B1FF; font-size: 12px; font-weight: 600; }
 
         QLabel#sectionTitle {
             font-size: 11px; font-weight: 700; color: #8A8A8A; letter-spacing: 2px; padding: 4px 0;
