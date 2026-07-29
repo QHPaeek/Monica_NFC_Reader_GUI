@@ -136,10 +136,7 @@ deploy: $(TARGET)
 	mkdir -p deploy
 	cp $(TARGET) deploy/
 	windeployqt6 --no-translations --no-compiler-runtime --no-system-d3d-compiler deploy/$(TARGET)
-	cp /c/msys64/mingw64/bin/libhidapi-0.dll deploy/
-	cp /c/msys64/mingw64/bin/libwinpthread-1.dll deploy/
-	cp /c/msys64/mingw64/bin/libstdc++-6.dll deploy/
-	cp /c/msys64/mingw64/bin/libgcc_s_seh-1.dll deploy/
+	bash copy-deps.sh deploy/$(TARGET) deploy/
 	@echo "[DEPLOY] Done → deploy/ folder"
 
 pack: deploy
@@ -152,7 +149,7 @@ pack: deploy
 	echo 'ExtractPathText="Select folder:"' >> deploy/config.txt
 	echo 'ExecuteFile="Monica_NFC_Reader_GUI.exe"' >> deploy/config.txt
 	echo ';!@InstallEnd@!' >> deploy/config.txt
-	cd deploy && "/c/Program Files/7-Zip/7z.exe" a -sfx7zS.sfx ../MonicaNFCReader_Setup.exe Monica_NFC_Reader_GUI.exe Qt6Core.dll Qt6Gui.dll Qt6Network.dll Qt6Widgets.dll libhidapi-0.dll libwinpthread-1.dll libstdc++-6.dll libgcc_s_seh-1.dll generic/ imageformats/ networkinformation/ platforms/ styles/ tls/ config.txt > /dev/null
+	cd deploy && "/c/Program Files/7-Zip/7z.exe" a -sfx7zS.sfx ../MonicaNFCReader_Setup.exe * -x!config.txt -x!7zS.sfx > /dev/null
 	rm -f deploy/7zS.sfx deploy/config.txt
 	@echo "[PACK] Done → MonicaNFCReader_Setup.exe"
 

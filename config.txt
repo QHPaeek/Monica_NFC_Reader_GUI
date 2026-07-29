@@ -1,0 +1,6 @@
+;!@Install@!UTF-8!
+Title="Monica NFC Reader GUI"
+BeginPrompt="Install Monica NFC Reader GUI?"
+ExtractPathText="Select folder:"
+ExecuteFile="Monica_NFC_Reader_GUI.exe"
+;!@InstallEnd@!
