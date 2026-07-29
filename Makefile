@@ -125,7 +125,7 @@ $(BLD_DIR)/hidworker.o:    $(BLD_DIR)/moc_hidworker.cpp
 # ======================================================================
 clean:
 	@echo "[CLEAN] Removing build artifacts..."
-	rm -rf $(BLD_DIR) $(TARGET)
+	rm -rf $(BLD_DIR) $(TARGET) CardReader.exe
 
 run: $(TARGET)
 	./$(TARGET)
