@@ -10,6 +10,8 @@
 #include <QUrl>
 #include <QStyle>
 #include <QThread>
+#include <QStandardPaths>
+#include <QDir>
 
 /* ====================================================================
  *  AIC 卡号解密 (S_BOX_INV) — 来自 STM32 固件 mode_sega_serial.c
@@ -1251,7 +1253,7 @@ static int g_dfuMirrorIdx = 0;
 
 void MainWindow::onDfuCheckTool()
 {
-    // 查找 dfu-util.exe: 优先看 exe 同目录, 再看 tools/
+    // 1. 查找 dfu-util.exe: 优先看 exe 同目录和 tools/
     QStringList searchPaths;
     searchPaths << QCoreApplication::applicationDirPath() + QStringLiteral("/dfu-util.exe")
                 << QCoreApplication::applicationDirPath() + QStringLiteral("/tools/dfu-util.exe");
@@ -1266,14 +1268,33 @@ void MainWindow::onDfuCheckTool()
         }
     }
 
-    // 没找到 → 显示下载按钮
+    // 2. 从内置资源释放 dfu-util.exe 到临时目录
+    QString tempPath = QStandardPaths::writableLocation(
+        QStandardPaths::TempLocation)
+        + QStringLiteral("/monica_nfc/dfu-util.exe");
+    QDir().mkpath(QFileInfo(tempPath).absolutePath());
+
+    QFile resFile(QStringLiteral(":/dfu-util.exe"));
+    if (resFile.open(QIODevice::ReadOnly)) {
+        QFile outFile(tempPath);
+        if (outFile.open(QIODevice::WriteOnly)) {
+            outFile.write(resFile.readAll());
+            outFile.close();
+            m_dfuToolPath = tempPath;
+            m_dfuDownloadBtn->setVisible(false);
+            m_dfuLog->appendPlainText(
+                QString::fromUtf8("[OK] dfu-util 已从内置资源释放到 %1\n").arg(tempPath));
+            return;
+        }
+    }
+
+    // 3. 都没找到 → 显示下载按钮（兜底）
     m_dfuDownloadBtn->setVisible(true);
     m_dfuDownloadBtn->setText(
         QString::fromUtf8("未找到 dfu-util.exe，点击自动下载"));
     m_dfuDownloadBtn->setToolTip(QString::fromUtf8(
         "将从可信任源下载 dfu-util 到程序目录"));
 
-    // 也自动弹对话框问
     g_dfuMirrorIdx = 0;
     auto result = QMessageBox::question(this,
         trC(QString::fromUtf8("缺少工具"),

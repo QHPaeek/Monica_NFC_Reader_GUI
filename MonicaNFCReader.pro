@@ -13,5 +13,7 @@ HEADERS += \
     src/hidworker.h \
     src/flashdata.h
 
+RESOURCES += resources.qrc
+
 INCLUDEPATH += C:/msys64/mingw64/include/hidapi
 LIBS += -LC:/msys64/mingw64/lib -lhidapi -lsetupapi

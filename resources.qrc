@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/">
+        <file alias="dfu-util.exe">C:/msys64/mingw64/bin/dfu-util.exe</file>
+    </qresource>
+</RCC>
