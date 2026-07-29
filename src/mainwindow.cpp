@@ -6,6 +6,8 @@
 #include <QMessageBox>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QDesktopServices>
+#include <QUrl>
 #include <QStyle>
 #include <QThread>
 
@@ -200,6 +202,16 @@ QWidget* MainWindow::buildHeaderPanel()
     QLabel *title = new QLabel(QStringLiteral("NFC Card Reader"));
     title->setObjectName(QStringLiteral("appTitle"));
 
+    QPushButton *btnTutorial = new QPushButton(
+        QString::fromUtf8("教程网站"), header);
+    btnTutorial->setObjectName(QStringLiteral("btnTutorial"));
+    btnTutorial->setCursor(Qt::PointingHandCursor);
+    connect(btnTutorial, &QPushButton::clicked, this, []() {
+        QDesktopServices::openUrl(QUrl(
+            QStringLiteral("https://affinelab.notion.site/"
+            "Aime-Manual-66c171d3fc144ae2bc4369d45000f0eb")));
+    });
+
     m_lblConnDot = new QLabel(this);
     m_lblConnDot->setObjectName(QStringLiteral("connDot"));
     m_lblConnDot->setFixedSize(10, 10);
@@ -239,6 +251,8 @@ QWidget* MainWindow::buildHeaderPanel()
             this, &MainWindow::onJumpToDfu);
 
     hbox->addWidget(title);
+    hbox->addWidget(btnTutorial);
+    hbox->addSpacing(12);
     hbox->addStretch();
     hbox->addWidget(m_lblReaderModel);
     hbox->addSpacing(12);
@@ -1626,6 +1640,11 @@ void MainWindow::applyStyleSheet()
         QLabel#appTitle {
             font-size: 18px; font-weight: 600; color: #1A1A1A; padding: 0 8px;
         }
+        QPushButton#btnTutorial {
+            background: transparent; color: #0078D4; border: none;
+            font-size: 12px; text-decoration: underline; padding: 2px 8px;
+        }
+        QPushButton#btnTutorial:hover { color: #106EBE; }
         QLabel#connDot {
             border-radius: 5px; min-width: 10px; min-height: 10px;
             max-width: 10px; max-height: 10px;
