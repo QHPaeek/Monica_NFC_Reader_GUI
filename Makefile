@@ -83,7 +83,9 @@ deploy: $(TARGET)
 	cp $(TARGET) deploy/
 	windeployqt6 --no-translations --no-compiler-runtime --no-system-d3d-compiler deploy/$(TARGET) 2>/dev/null || true
 	bash copy-deps.sh deploy/$(TARGET) deploy/
-	cp /c/msys64/mingw64/bin/libiconv-2.dll deploy/ 2>/dev/null || true
+	cp /c/msys64/mingw64/bin/libiconv-2.dll deploy/
+	cp /c/msys64/mingw64/bin/libpcre2-8-0.dll deploy/
+	cp /c/msys64/mingw64/bin/libintl-8.dll deploy/
 	@echo "[DEPLOY] Done → deploy/"
 
 # ======================================================================
@@ -96,7 +98,7 @@ pack: deploy
 	echo ';!@Install@!UTF-8!' > deploy/config.txt
 	echo 'Title="Monica NFC Reader GUI"' >> deploy/config.txt
 	echo 'BeginPrompt="Install Monica NFC Reader GUI?"' >> deploy/config.txt
-	echo 'Directory="Monica NFC Reader"' >> deploy/config.txt
+	echo 'InstallPath="Monica NFC Reader"' >> deploy/config.txt
 	echo 'ExtractPathText="Select folder:"' >> deploy/config.txt
 	echo 'ExecuteFile="Monica_NFC_Reader_GUI.exe"' >> deploy/config.txt
 	echo ';!@InstallEnd@!' >> deploy/config.txt
