@@ -228,6 +228,7 @@ private:
     int         m_writeCardStep;   // 0=block2, 1=block3
     QByteArray  m_writeCardSerial;
     QPushButton *m_btnWriteCardTab;  // 左侧切换到写卡页的按钮
+    uint8_t     m_lastCardType;       // 最近一次检测到的卡种
 };
 
 #endif // MAINWINDOW_H

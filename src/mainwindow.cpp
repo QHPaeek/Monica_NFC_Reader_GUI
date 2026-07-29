@@ -117,6 +117,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_writeCardPending(false)
     , m_writeCardStep(0)
     , m_btnWriteCardTab(nullptr)
+    , m_lastCardType(Card_None)
 {
     memset(&m_flashData, 0, sizeof(FlashData));
 
@@ -1717,6 +1718,8 @@ void MainWindow::onDeviceError(const QString &msg)
 
 void MainWindow::onCardDetected(uint8_t cardType, const QByteArray &rawData)
 {
+    m_lastCardType = cardType;
+
     // 写卡模式下拦截空白卡检测
     if (m_writeCardPending && cardType == Card_Blank_Mifare) {
         if (m_writeCardTimer) m_writeCardTimer->stop();
@@ -1884,6 +1887,7 @@ void MainWindow::onWriteCardClicked()
     dlgLayout->addWidget(dlgLabel);
     dlgLayout->addWidget(cancelBtn, 0, Qt::AlignCenter);
 
+    m_writeCardStep    = 0;
     m_writeCardPending = true;
 
     // 超时定时器 (30 秒)
@@ -1894,6 +1898,14 @@ void MainWindow::onWriteCardClicked()
                 this, &MainWindow::onWriteCardTimeout);
     }
     m_writeCardTimer->start(30000);
+
+    // 卡片已在读卡器上 → 直接触发写入
+    if (m_lastCardType == Card_Blank_Mifare) {
+        m_writeCardTimer->stop();
+        m_writeCardDialog->accept();
+        doWriteBlock2();
+        return;
+    }
 
     m_writeCardDialog->exec();
 
