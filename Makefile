@@ -19,14 +19,14 @@ IS_QT6 := $(shell pkg-config --exists Qt6Core 2>/dev/null && echo 1 || echo 0)
 IS_QT5 := $(shell pkg-config --exists Qt5Core 2>/dev/null && echo 1 || echo 0)
 
 ifeq ($(IS_QT6),1)
-    QT_PKG := Qt6Widgets Qt6Core Qt6Gui
+    QT_PKG := Qt6Widgets Qt6Core Qt6Gui Qt6Network
     # moc 位置: pkg-config libexecdir 直接指向 share/qt6/bin/
     MOC := $(shell pkg-config --variable=libexecdir Qt6Core 2>/dev/null)/moc
     ifeq ($(shell test -x "$(MOC)" || echo no),no)
         $(error "moc not found at $(MOC). Set MOC=/path/to/moc manually.")
     endif
 else ifeq ($(IS_QT5),1)
-    QT_PKG := Qt5Widgets Qt5Core Qt5Gui
+    QT_PKG := Qt5Widgets Qt5Core Qt5Gui Qt5Network
     MOC    := $(shell which moc 2>/dev/null || which moc-qt5 2>/dev/null)
 else
     ifdef QTDIR

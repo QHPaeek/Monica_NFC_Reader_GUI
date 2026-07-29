@@ -101,6 +101,9 @@ MainWindow::MainWindow(QWidget *parent)
     , m_connected(false)
     , m_langEn(false)
     , m_inDfuMode(false)
+    , m_netManager(new QNetworkAccessManager(this))
+    , m_dlProgress(nullptr)
+    , m_dfuDownloadBtn(nullptr)
 {
     memset(&m_flashData, 0, sizeof(FlashData));
 
@@ -408,6 +411,14 @@ QWidget* MainWindow::buildDfuPage()
         QStringLiteral("Target: STM32F072  @  0x08000000"), w);
     targetLabel->setObjectName(QStringLiteral("tabDesc"));
 
+    // 工具检测 + 下载按钮
+    QHBoxLayout *toolRow = new QHBoxLayout();
+    m_dfuDownloadBtn = new QPushButton(QString::fromUtf8("未找到 dfu-util, 点击下载"), w);
+    m_dfuDownloadBtn->setObjectName(QStringLiteral("btnSecondary"));
+    m_dfuDownloadBtn->setVisible(false);
+    connect(m_dfuDownloadBtn, &QPushButton::clicked,
+            this, &MainWindow::onDfuCheckTool);
+
     // 烧录按钮
     m_dfuFlashBtn = new QPushButton(QString::fromUtf8("烧录固件"), w);
     m_dfuFlashBtn->setObjectName(QStringLiteral("btnPrimary"));
@@ -434,10 +445,17 @@ QWidget* MainWindow::buildDfuPage()
             QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &MainWindow::onDfuProcessFinished);
 
+    connect(m_netManager, &QNetworkAccessManager::finished,
+            this, &MainWindow::onDfuDownloadFinished);
+
+    toolRow->addWidget(m_dfuDownloadBtn);
+    toolRow->addStretch();
+
     vbox->addWidget(title);
     vbox->addWidget(desc);
     vbox->addLayout(fileRow);
     vbox->addWidget(targetLabel);
+    vbox->addLayout(toolRow);
     vbox->addWidget(m_dfuFlashBtn);
     vbox->addWidget(m_dfuLog, 1);
 
@@ -1156,6 +1174,150 @@ void MainWindow::onDfuProcessFinished(int exitCode)
     }
 }
 
+/* ---- dfu-util 自动下载 ---- */
+
+static const QStringList g_dfuMirrors = {
+    // 优先 Gitee 镜像 (国内快)
+    QStringLiteral("https://gitee.com/qinh/dfu-util-win64/raw/master/dfu-util.exe"),
+    // GitHub 原始文件
+    QStringLiteral("https://github.com/qinh/dfu-util-win64/raw/master/dfu-util.exe"),
+    // SourceForge 官方
+    QStringLiteral("https://downloads.sourceforge.net/project/dfu-util/dfu-util-0.11/dfu-util-0.11-binaries/win32-mingw32/dfu-util.exe"),
+};
+static int g_dfuMirrorIdx = 0;
+
+void MainWindow::onDfuCheckTool()
+{
+    // 查找 dfu-util.exe: 优先看 exe 同目录, 再看 tools/
+    QStringList searchPaths;
+    searchPaths << QCoreApplication::applicationDirPath() + QStringLiteral("/dfu-util.exe")
+                << QCoreApplication::applicationDirPath() + QStringLiteral("/tools/dfu-util.exe");
+
+    for (const auto &p : searchPaths) {
+        if (QFile::exists(p)) {
+            m_dfuFilePath = p;
+            m_dfuDownloadBtn->setVisible(false);
+            m_dfuLog->appendPlainText(
+                QString::fromUtf8("[OK] 找到 dfu-util: %1\n").arg(p));
+            return;
+        }
+    }
+
+    // 没找到 → 显示下载按钮
+    m_dfuDownloadBtn->setVisible(true);
+    m_dfuDownloadBtn->setText(
+        QString::fromUtf8("未找到 dfu-util.exe，点击自动下载"));
+    m_dfuDownloadBtn->setToolTip(QString::fromUtf8(
+        "将从可信任源下载 dfu-util 到程序目录"));
+
+    // 也自动弹对话框问
+    g_dfuMirrorIdx = 0;
+    auto result = QMessageBox::question(this,
+        trC(QString::fromUtf8("缺少工具"),
+            QStringLiteral("Missing Tool")),
+        trC(QString::fromUtf8(
+            "未找到 dfu-util.exe，无法进行固件烧录。\n\n"
+            "是否自动从可信任源下载？"),
+            QStringLiteral(
+            "dfu-util.exe not found.\n\n"
+            "Download automatically from a trusted source?")),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+
+    if (result == QMessageBox::Yes) {
+        tryDownloadDfuUtil();
+    }
+}
+
+void MainWindow::tryDownloadDfuUtil()
+{
+    if (m_dlProgress) {
+        m_dlProgress->close();
+        delete m_dlProgress;
+    }
+
+    m_dlProgress = new QProgressDialog(
+        trC(QString::fromUtf8("正在下载 dfu-util..."),
+            QStringLiteral("Downloading dfu-util...")),
+        trC(QStringLiteral("取消"), QStringLiteral("Cancel")),
+        0, 0, this);
+    m_dlProgress->setWindowModality(Qt::WindowModal);
+    m_dlProgress->show();
+
+    m_dfuLog->appendPlainText(
+        QString::fromUtf8("正在下载 dfu-util...\n"));
+
+    QUrl url(g_dfuMirrors.at(g_dfuMirrorIdx));
+    QNetworkRequest req(url);
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                     QNetworkRequest::NoLessSafeRedirectPolicy);
+    m_netManager->get(req);
+}
+
+void MainWindow::onDfuDownloadFinished(QNetworkReply *reply)
+{
+    if (m_dlProgress) {
+        m_dlProgress->close();
+        delete m_dlProgress;
+        m_dlProgress = nullptr;
+    }
+
+    QByteArray data = reply->readAll();
+    int status = reply->attribute(
+        QNetworkRequest::HttpStatusCodeAttribute).toInt();
+
+    if (reply->error() != QNetworkReply::NoError || status >= 400) {
+        m_dfuLog->appendPlainText(
+            QString::fromUtf8("[下载失败] %1 (HTTP %2)\n")
+                .arg(reply->errorString()).arg(status));
+
+        // 尝试下一个镜像
+        g_dfuMirrorIdx++;
+        if (g_dfuMirrorIdx < g_dfuMirrors.size()) {
+            m_dfuLog->appendPlainText(
+                QString::fromUtf8("尝试备用源: %1\n")
+                    .arg(g_dfuMirrors.at(g_dfuMirrorIdx)));
+            tryDownloadDfuUtil();
+        } else {
+            m_dfuLog->appendPlainText(
+                QString::fromUtf8(
+                    "[错误] 所有下载源均已失败。\n"
+                    "请手动下载 dfu-util.exe 并放到程序目录下。\n"));
+        }
+        reply->deleteLater();
+        return;
+    }
+
+    // 验证不是 HTML 错误页
+    if (data.size() < 1024) {
+        m_dfuLog->appendPlainText(
+            QString::fromUtf8("[错误] 下载的文件过小 (%1 字节)，可能不是有效的 exe。\n")
+                .arg(data.size()));
+        reply->deleteLater();
+        return;
+    }
+
+    // 保存到 exe 同目录
+    QString savePath = QCoreApplication::applicationDirPath()
+                       + QStringLiteral("/dfu-util.exe");
+    QFile file(savePath);
+    if (!file.open(QIODevice::WriteOnly)) {
+        m_dfuLog->appendPlainText(
+            QStringLiteral("[错误] 无法写入 %1\n").arg(savePath));
+        reply->deleteLater();
+        return;
+    }
+    file.write(data);
+    file.close();
+
+    m_dfuLog->appendPlainText(
+        QString::fromUtf8("[OK] dfu-util 已下载到 %1 (%2 KB)\n")
+            .arg(savePath).arg(data.size() / 1024));
+
+    m_dfuDownloadBtn->setVisible(false);
+    m_dfuFilePath = savePath;
+    reply->deleteLater();
+}
+
 void MainWindow::onToggleLanguage()
 {
     m_langEn = !m_langEn;
@@ -1301,11 +1463,12 @@ void MainWindow::onDeviceDisconnected()
     if (m_inDfuMode) {
         m_inDfuMode = false;
         setControlsEnabled(false);
-        m_stackedRight->setCurrentIndex(1);  // 切换到 DFU 页面
+        m_stackedRight->setCurrentIndex(1);
         m_btnDfu->hide();
         m_lblStatusMsg->setText(trC(
             QString::fromUtf8("设备已进入 DFU 模式，请选择固件文件烧录。"),
             QStringLiteral("Device entered DFU mode. Select firmware to flash.")));
+        onDfuCheckTool();   // 检查 dfu-util 是否可用
     } else {
         setControlsEnabled(false);
         m_lblStatusMsg->setText(trC(

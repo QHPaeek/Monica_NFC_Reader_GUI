@@ -25,6 +25,9 @@
 #include <QPlainTextEdit>
 #include <QStackedWidget>
 #include <QFileDialog>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QProgressDialog>
 
 #include "flashdata.h"
 #include "hidworker.h"
@@ -71,6 +74,9 @@ private slots:
     void onDfuFlash();
     void onDfuProcessOutput();
     void onDfuProcessFinished(int exitCode);
+    void onDfuCheckTool();
+    void tryDownloadDfuUtil();
+    void onDfuDownloadFinished(QNetworkReply *reply);
 
 private:
     /* ---- UI 初始化 ---- */
@@ -189,6 +195,11 @@ private:
     QProcess       *m_dfuProcess;
     QString         m_dfuFilePath;
     bool            m_inDfuMode;
+
+    /* 网络下载 dfu-util */
+    QNetworkAccessManager *m_netManager;
+    QProgressDialog       *m_dlProgress;
+    QPushButton           *m_dfuDownloadBtn;
 
     /* 状态栏 */
     QLabel     *m_lblStatusMsg;
