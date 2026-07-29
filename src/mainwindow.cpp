@@ -1130,21 +1130,50 @@ void MainWindow::onDfuFlash()
     m_dfuFlashBtn->setEnabled(false);
     m_dfuLog->clear();
 
-    QString program = QStringLiteral("dfu-util");
+    QString program;
     QStringList args;
-    args << QStringLiteral("-a") << QStringLiteral("0")
-         << QStringLiteral("-s") << QStringLiteral("0x08000000:leave")
-         << QStringLiteral("-D") << m_dfuFilePath;
+    
+    // 检查文件类型决定是否用 dfu-suffix
+    if (m_dfuFilePath.endsWith(QStringLiteral(".dfu"), Qt::CaseInsensitive)) {
+        // .dfu 文件直接烧录
+        program = QStringLiteral("dfu-util");
+        args << QStringLiteral("-a") << QStringLiteral("0")
+             << QStringLiteral("-s") << QStringLiteral("0x08000000:leave")
+             << QStringLiteral("-D") << m_dfuFilePath;
+    } else {
+        // .bin / .hex 文件
+        program = QStringLiteral("dfu-util");
+        args << QStringLiteral("-a") << QStringLiteral("0")
+             << QStringLiteral("-s") << QStringLiteral("0x08000000:leave")
+             << QStringLiteral("-D") << m_dfuFilePath;
+    }
 
     m_dfuLog->appendPlainText(
         QStringLiteral("$ dfu-util %1\n").arg(args.join(QLatin1Char(' '))));
 
+    // 带重试: 设备进入 DFU 后重枚举可能需要 2-3 秒
+    m_dfuRetryCount = 3;
+    startDfuFlash(program, args);
+}
+
+void MainWindow::startDfuFlash(const QString &program, const QStringList &args)
+{
     m_dfuProcess->start(program, args);
-    if (!m_dfuProcess->waitForStarted(3000)) {
-        m_dfuLog->appendPlainText(
-            QString::fromUtf8("[错误] 无法启动 dfu-util。\n"
-            "请确认已安装: pacman -S mingw-w64-x86_64-dfu-util\n"));
-        m_dfuFlashBtn->setEnabled(true);
+    if (!m_dfuProcess->waitForStarted(5000)) {
+        if (--m_dfuRetryCount > 0) {
+            m_dfuLog->appendPlainText(
+                QString::fromUtf8("等待设备重枚举 (%1/3)...\n")
+                    .arg(3 - m_dfuRetryCount));
+            QTimer::singleShot(1500, this, [this, program, args]() {
+                startDfuFlash(program, args);
+            });
+        } else {
+            m_dfuLog->appendPlainText(
+                QString::fromUtf8("[错误] 无法启动 dfu-util。\n"
+                "请确认 dfu-util.exe 在程序目录下，且设备已进入 DFU 模式。\n"
+                "安装指令: pacman -S mingw-w64-x86_64-dfu-util\n"));
+            m_dfuFlashBtn->setEnabled(true);
+        }
     }
 }
 
@@ -1163,14 +1192,17 @@ void MainWindow::onDfuProcessFinished(int exitCode)
     m_dfuFlashBtn->setEnabled(true);
     if (exitCode == 0) {
         m_dfuLog->appendPlainText(
-            QString::fromUtf8("\n[成功] 固件烧录完成！\n"));
+            QString::fromUtf8("\n[成功] 固件烧录完成！设备已重启。\n"));
         QMessageBox::information(this,
             trC(QString::fromUtf8("完成"), QStringLiteral("Done")),
-            trC(QString::fromUtf8("固件已成功烧录到设备。"),
-                QStringLiteral("Firmware flashed successfully.")));
+            trC(QString::fromUtf8("固件已成功烧录到设备。\n\n设备已自动重启，请重新点击「连接」。"),
+                QStringLiteral("Firmware flashed successfully.\n\n"
+                "Device has rebooted. Click Connect to reconnect.")));
     } else {
         m_dfuLog->appendPlainText(
-            QString::fromUtf8("\n[失败] dfu-util 返回错误码 %1\n").arg(exitCode));
+            QString::fromUtf8("\n[失败] dfu-util 返回错误码 %1\n"
+            "常见原因: 设备未进入 DFU 模式、USB 驱动未安装、文件格式不正确\n")
+                .arg(exitCode));
     }
 }
 
