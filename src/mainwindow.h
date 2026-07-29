@@ -72,6 +72,9 @@ private slots:
     void onJumpToDfu();
     void onDfuFileBrowse();
     void onDfuFlash();
+    void onDfuListFinished(int exitCode, QProcess::ExitStatus status);
+    void onDfuFlashFinished(int exitCode, QProcess::ExitStatus status);
+    void onDfuResetFinished(int exitCode, QProcess::ExitStatus status);
     void onDfuCheckTool();
     void tryDownloadDfuUtil();
     void onDfuDownloadFinished(QNetworkReply *reply);
