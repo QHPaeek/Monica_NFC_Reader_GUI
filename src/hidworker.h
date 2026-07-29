@@ -97,6 +97,7 @@ public slots:
     void requestFlashWrite(const FlashData &data);
     void requestLedColor(uint8_t r, uint8_t g, uint8_t b);
     void requestJumpToDfu();
+    void requestWriteCard(const QByteArray &serial10);
 
 signals:
     /* 设备／连接状态 */
@@ -112,6 +113,7 @@ signals:
     void flashDataRead(const FlashData &data, uint8_t readerType,
                        uint8_t fwVersion);
     void flashDataWritten(bool success);
+    void writeCardResult(bool success);
 
     /* 原始数据监控 — 不做协议解析, 供 GUI 日志窗口使用 */
     void rawDataSent(const QByteArray &report);

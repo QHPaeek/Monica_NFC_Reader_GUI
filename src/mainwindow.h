@@ -79,6 +79,12 @@ private slots:
     void tryDownloadDfuUtil();
     void onDfuDownloadFinished(QNetworkReply *reply);
 
+    /* 写 Aime 卡 */
+    void onWriteCardClicked();
+    void onWriteCardCancel();
+    void onWriteCardResult(bool success);
+    void onWriteCardTimeout();
+
 private:
     /* ---- UI 初始化 ---- */
     void setupUI();
@@ -89,6 +95,7 @@ private:
     QWidget* buildCardMonitorPanel();
     QWidget* buildSettingsPanel();
     QWidget* buildDfuPage();
+    QWidget* buildWriteCardPage();
     QWidget* createSegaTab();
     QWidget* createSpiceTab();
     QWidget* createNamcoTab();
@@ -184,9 +191,10 @@ private:
     QPushButton *m_btnReset;
     QPushButton *m_btnDfu;
 
-    /* 右侧内容栈 (设置 / DFU) */
+    /* 右侧内容栈 (设置 / DFU / 写卡) */
     QStackedWidget *m_stackedRight;
     QWidget        *m_dfuPage;
+    QWidget        *m_writeCardPage;
 
     /* DFU 页面 */
     QLineEdit      *m_dfuFileEdit;
@@ -205,6 +213,17 @@ private:
 
     /* 状态栏 */
     QLabel     *m_lblStatusMsg;
+
+    /* 写卡 */
+    QLineEdit  *m_writeCardInput;
+    QLabel     *m_writeCardHint;
+    QPushButton *m_writeCardBtn;
+    QPushButton *m_writeCardBackBtn;
+    QDialog    *m_writeCardDialog;
+    QTimer     *m_writeCardTimer;
+    bool        m_writeCardPending;
+    QByteArray  m_writeCardSerial;
+    QPushButton *m_btnWriteCardTab;  // 左侧切换到写卡页的按钮
 };
 
 #endif // MAINWINDOW_H

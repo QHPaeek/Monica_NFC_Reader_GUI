@@ -108,6 +108,14 @@ MainWindow::MainWindow(QWidget *parent)
     , m_netManager(new QNetworkAccessManager(this))
     , m_dlProgress(nullptr)
     , m_dfuDownloadBtn(nullptr)
+    , m_writeCardInput(nullptr)
+    , m_writeCardHint(nullptr)
+    , m_writeCardBtn(nullptr)
+    , m_writeCardBackBtn(nullptr)
+    , m_writeCardDialog(nullptr)
+    , m_writeCardTimer(nullptr)
+    , m_writeCardPending(false)
+    , m_btnWriteCardTab(nullptr)
 {
     memset(&m_flashData, 0, sizeof(FlashData));
 
@@ -128,6 +136,8 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::onFlashDataRead);
     connect(m_hid, &HIDWorker::flashDataWritten,
             this, &MainWindow::onFlashDataWritten);
+    connect(m_hid, &HIDWorker::writeCardResult,
+            this, &MainWindow::onWriteCardResult);
     connect(m_hid, &HIDWorker::rawDataSent,
             this, &MainWindow::onRawDataSent);
     connect(m_hid, &HIDWorker::rawDataReceived,
@@ -173,8 +183,9 @@ void MainWindow::setupUI()
     splitter->setChildrenCollapsible(false);
     splitter->addWidget(buildCardMonitorPanel());
     m_stackedRight = new QStackedWidget(central);
-    m_stackedRight->addWidget(buildSettingsPanel());
-    m_stackedRight->addWidget(buildDfuPage());
+    m_stackedRight->addWidget(buildSettingsPanel());   // index 0
+    m_stackedRight->addWidget(buildDfuPage());          // index 1
+    m_stackedRight->addWidget(buildWriteCardPage());    // index 2
     m_stackedRight->setCurrentIndex(0);
     splitter->addWidget(m_stackedRight);
     splitter->setStretchFactor(0, 2);
@@ -252,6 +263,14 @@ QWidget* MainWindow::buildHeaderPanel()
     connect(m_btnDfu, &QPushButton::clicked,
             this, &MainWindow::onJumpToDfu);
 
+    m_btnWriteCardTab = new QPushButton(QString::fromUtf8("写入Aime卡"));
+    m_btnWriteCardTab->setObjectName(QStringLiteral("btnSecondary"));
+    m_btnWriteCardTab->setCursor(Qt::PointingHandCursor);
+    connect(m_btnWriteCardTab, &QPushButton::clicked, this, [this]() {
+        m_stackedRight->setCurrentIndex(2);
+        m_writeCardInput->setFocus();
+    });
+
     hbox->addWidget(title);
     hbox->addWidget(btnTutorial);
     hbox->addSpacing(12);
@@ -266,6 +285,8 @@ QWidget* MainWindow::buildHeaderPanel()
     hbox->addWidget(m_btnLang);
     hbox->addSpacing(8);
     hbox->addWidget(m_btnDfu);
+    hbox->addSpacing(8);
+    hbox->addWidget(m_btnWriteCardTab);
     hbox->addSpacing(8);
     hbox->addWidget(m_btnConnect);
     hbox->addWidget(m_btnDisconnect);
@@ -470,6 +491,114 @@ QWidget* MainWindow::buildDfuPage()
     vbox->addLayout(toolRow);
     vbox->addWidget(m_dfuFlashBtn);
     vbox->addWidget(m_dfuLog, 1);
+
+    return w;
+}
+
+/* ---- 写 Aime 卡页面 ---- */
+QWidget* MainWindow::buildWriteCardPage()
+{
+    QWidget *w = new QWidget(this);
+    QVBoxLayout *vbox = new QVBoxLayout(w);
+    vbox->setContentsMargins(24, 24, 24, 24);
+    vbox->setSpacing(14);
+
+    QLabel *title = new QLabel(QString::fromUtf8("写入 Aime 卡号"), w);
+    title->setObjectName(QStringLiteral("sectionTitle"));
+
+    QLabel *desc = new QLabel(QString::fromUtf8(
+        "此功能用于向空白 MIFARE 卡写入 Aime 卡号。\n"
+        "⏹ 只能写入空白卡，已有数据的卡无法覆盖\n"
+        "⏹ 写入操作不可逆，请务必确认卡号无误\n"
+        "⏹ 卡号必须为 20 位纯数字，不能以 3 开头"), w);
+    desc->setObjectName(QStringLiteral("tabDesc"));
+    desc->setWordWrap(true);
+    desc->setStyleSheet(QStringLiteral(
+        "QLabel#tabDesc { color: #D32F2F; font-size: 13px; }"));
+
+    // 输入框
+    QHBoxLayout *inputRow = new QHBoxLayout();
+    QLabel *inputLabel = new QLabel(QString::fromUtf8("卡号 (20位):"), w);
+    inputLabel->setStyleSheet(QStringLiteral("font-weight: bold;"));
+    m_writeCardInput = new QLineEdit(w);
+    m_writeCardInput->setPlaceholderText(
+        QString::fromUtf8("请输入 20 位纯数字卡号"));
+    m_writeCardInput->setMaxLength(20);
+    m_writeCardInput->setStyleSheet(QStringLiteral(
+        "QLineEdit { font-size: 16px; padding: 8px;"
+        "border: 2px solid #ccc; border-radius: 4px; }"
+        "QLineEdit:focus { border-color: #0078D4; }"));
+    inputRow->addWidget(inputLabel);
+    inputRow->addWidget(m_writeCardInput, 1);
+
+    // 提示标签
+    m_writeCardHint = new QLabel(w);
+    m_writeCardHint->setStyleSheet(QStringLiteral(
+        "color: #D32F2F; font-size: 12px; min-height: 18px;"));
+
+    // 按钮行
+    QHBoxLayout *btnRow = new QHBoxLayout();
+    m_writeCardBackBtn = new QPushButton(
+        QString::fromUtf8("返回设置"), w);
+    m_writeCardBackBtn->setObjectName(QStringLiteral("btnSecondary"));
+    connect(m_writeCardBackBtn, &QPushButton::clicked, this, [this]() {
+        m_stackedRight->setCurrentIndex(0);
+    });
+
+    m_writeCardBtn = new QPushButton(
+        QString::fromUtf8("写入卡片"), w);
+    m_writeCardBtn->setObjectName(QStringLiteral("btnPrimary"));
+    m_writeCardBtn->setEnabled(false);
+    connect(m_writeCardBtn, &QPushButton::clicked,
+            this, &MainWindow::onWriteCardClicked);
+
+    // 输入验证
+    connect(m_writeCardInput, &QLineEdit::textChanged, this,
+            [this](const QString &text) {
+        if (text.isEmpty()) {
+            m_writeCardHint->clear();
+            m_writeCardBtn->setEnabled(false);
+            return;
+        }
+        if (text.length() != 20) {
+            m_writeCardHint->setText(
+                QString::fromUtf8("✘ 卡号长度不足 20 位"));
+            m_writeCardBtn->setEnabled(false);
+            return;
+        }
+        bool ok = true;
+        for (const QChar &ch : text) {
+            if (!ch.isDigit()) { ok = false; break; }
+        }
+        if (!ok) {
+            m_writeCardHint->setText(
+                QString::fromUtf8("✘ 卡号格式错误：必须为纯数字"));
+            m_writeCardBtn->setEnabled(false);
+            return;
+        }
+        if (text.startsWith(QLatin1Char('3'))) {
+            m_writeCardHint->setText(
+                QString::fromUtf8("✘ 卡号不能以 3 开头 (3 开头为 Banapass 卡号)"));
+            m_writeCardBtn->setEnabled(false);
+            return;
+        }
+        m_writeCardHint->setText(
+            QString::fromUtf8("✓ 卡号格式正确，可以写入"));
+        m_writeCardHint->setStyleSheet(QStringLiteral(
+            "color: #2E7D32; font-size: 12px; min-height: 18px;"));
+        m_writeCardBtn->setEnabled(true);
+    });
+
+    btnRow->addWidget(m_writeCardBackBtn);
+    btnRow->addStretch();
+    btnRow->addWidget(m_writeCardBtn);
+
+    vbox->addWidget(title);
+    vbox->addWidget(desc);
+    vbox->addLayout(inputRow);
+    vbox->addWidget(m_writeCardHint);
+    vbox->addStretch();
+    vbox->addLayout(btnRow);
 
     return w;
 }
@@ -1587,6 +1716,19 @@ void MainWindow::onDeviceError(const QString &msg)
 
 void MainWindow::onCardDetected(uint8_t cardType, const QByteArray &rawData)
 {
+    // 写卡模式下拦截空白卡检测
+    if (m_writeCardPending && cardType == Card_Blank_Mifare) {
+        m_writeCardPending = false;
+        if (m_writeCardTimer) m_writeCardTimer->stop();
+        if (m_writeCardDialog) m_writeCardDialog->accept();
+
+        // 发送写卡命令
+        QMetaObject::invokeMethod(m_hid, "requestWriteCard",
+                                  Qt::QueuedConnection,
+                                  Q_ARG(QByteArray, m_writeCardSerial));
+        return;
+    }
+
     if (cardType == Card_None) {
         clearCardDisplay();
         m_lblStatusMsg->setText(trC(
@@ -1658,6 +1800,150 @@ void MainWindow::onFlashDataWritten(bool ok)
 // ====================================================================
 //  样式表 (与之前一致, 加 lang 按钮)
 // ====================================================================
+
+/* ---- 写卡 ---- */
+
+void MainWindow::onWriteCardClicked()
+{
+    if (!m_connected) {
+        QMessageBox::warning(this,
+            trC(QString::fromUtf8("未连接"), QStringLiteral("Not connected")),
+            trC(QString::fromUtf8("请先连接读卡器再操作。"),
+                QStringLiteral("Please connect the reader first.")));
+        return;
+    }
+
+    QString text = m_writeCardInput->text().trimmed();
+
+    // 二次验证
+    if (text.length() != 20) {
+        QMessageBox::warning(this,
+            QString::fromUtf8("格式错误"),
+            QString::fromUtf8("卡号必须为 20 位纯数字。"));
+        return;
+    }
+    for (const QChar &ch : text) {
+        if (!ch.isDigit()) {
+            QMessageBox::warning(this,
+                QString::fromUtf8("格式错误"),
+                QString::fromUtf8("卡号必须为纯数字，不能包含字母或符号。"));
+            return;
+        }
+    }
+    if (text.startsWith(QLatin1Char('3'))) {
+        QMessageBox::warning(this,
+            QString::fromUtf8("格式错误"),
+            QString::fromUtf8("卡号不能以 3 开头。3 开头为 Banapass 卡。"));
+        return;
+    }
+
+    // 最终确认
+    auto confirm = QMessageBox::warning(this,
+        QString::fromUtf8("确认写入"),
+        QString::fromUtf8(
+            "即将写入卡号:\n\n%1\n\n"
+            "⚠ 此操作不可逆！\n"
+            "确认卡号无误且卡片为空白 MIFARE 卡？")
+            .arg(text),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+
+    if (confirm != QMessageBox::Yes) return;
+
+    // 准备写入数据: 10 字节 HEX
+    m_writeCardSerial.clear();
+    for (int i = 0; i < 20; i += 2) {
+        bool ok;
+        uint8_t byte = text.mid(i, 2).toUInt(&ok, 16);
+        if (!ok) {
+            QMessageBox::warning(this,
+                QString::fromUtf8("格式错误"),
+                QString::fromUtf8("卡号格式异常。"));
+            return;
+        }
+        m_writeCardSerial.append(static_cast<char>(byte));
+    }
+
+    // 弹出等待对话框
+    if (m_writeCardDialog) delete m_writeCardDialog;
+    m_writeCardDialog = new QDialog(this,
+        Qt::Dialog | Qt::CustomizeWindowHint | Qt::WindowTitleHint);
+    m_writeCardDialog->setWindowTitle(
+        QString::fromUtf8("等待空白卡片"));
+    m_writeCardDialog->setMinimumWidth(320);
+
+    QVBoxLayout *dlgLayout = new QVBoxLayout(m_writeCardDialog);
+    QLabel *dlgLabel = new QLabel(
+        QString::fromUtf8("请将空白 MIFARE 卡放在读卡器上...\n\n"
+        "检测到空白卡后将自动写入。"), m_writeCardDialog);
+    dlgLabel->setWordWrap(true);
+    dlgLabel->setAlignment(Qt::AlignCenter);
+    dlgLabel->setStyleSheet(QStringLiteral("font-size: 14px; padding: 20px;"));
+
+    QPushButton *cancelBtn = new QPushButton(
+        QString::fromUtf8("取消"), m_writeCardDialog);
+    cancelBtn->setObjectName(QStringLiteral("btnSecondary"));
+    connect(cancelBtn, &QPushButton::clicked,
+            this, &MainWindow::onWriteCardCancel);
+
+    dlgLayout->addWidget(dlgLabel);
+    dlgLayout->addWidget(cancelBtn, 0, Qt::AlignCenter);
+
+    m_writeCardPending = true;
+
+    // 超时定时器 (30 秒)
+    if (!m_writeCardTimer) {
+        m_writeCardTimer = new QTimer(this);
+        m_writeCardTimer->setSingleShot(true);
+        connect(m_writeCardTimer, &QTimer::timeout,
+                this, &MainWindow::onWriteCardTimeout);
+    }
+    m_writeCardTimer->start(30000);
+
+    m_writeCardDialog->exec();
+
+    // 对话框关闭 (被 cancel 或 accept 关闭)
+    if (m_writeCardPending) {
+        m_writeCardPending = false;
+        m_writeCardTimer->stop();
+    }
+}
+
+void MainWindow::onWriteCardCancel()
+{
+    m_writeCardPending = false;
+    if (m_writeCardTimer) m_writeCardTimer->stop();
+    if (m_writeCardDialog) m_writeCardDialog->reject();
+}
+
+void MainWindow::onWriteCardResult(bool success)
+{
+    if (m_writeCardTimer) m_writeCardTimer->stop();
+    m_writeCardPending = false;
+
+    if (success) {
+        QMessageBox::information(this,
+            QString::fromUtf8("写入成功"),
+            QString::fromUtf8("卡号已成功写入卡片！\n\n"
+            "卡片已变为普通 Aime 卡，可正常使用。"));
+    } else {
+        QMessageBox::critical(this,
+            QString::fromUtf8("写入失败"),
+            QString::fromUtf8("卡号写入失败。\n\n"
+            "可能原因：卡片不是空白 MIFARE 卡、\n"
+            "卡片放置不稳定或读卡器异常。"));
+    }
+}
+
+void MainWindow::onWriteCardTimeout()
+{
+    if (!m_writeCardPending) return;
+    m_writeCardPending = false;
+    if (m_writeCardDialog) m_writeCardDialog->reject();
+
+    QMessageBox::warning(this,
+        QString::fromUtf8("读卡器无响应"),
+        QString::fromUtf8("等待超时 (30 秒)，未检测到空白卡片。"));
+}
 
 void MainWindow::applyStyleSheet()
 {

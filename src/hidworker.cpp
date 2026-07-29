@@ -198,6 +198,14 @@ void HIDWorker::requestJumpToDfu()
     writeReport(report);
 }
 
+void HIDWorker::requestWriteCard(const QByteArray &serial10)
+{
+    if (serial10.size() != 10) return;
+    QByteArray report = buildOutputReport(CMD_Write_Card,
+        reinterpret_cast<const uint8_t*>(serial10.constData()), 10);
+    writeReport(report);
+}
+
 /* ====================================================================
  *  组装 Output Report (Report ID 5)
  *
@@ -336,6 +344,9 @@ void HIDWorker::parseInputReport(const uint8_t *buf, int len)
     }
 
     case CMD_Write_Card:
+        // data[2] = status: 0x01=成功, 0x02=失败
+        emit writeCardResult(dataLen >= 3 && data[2] == 0x01);
+        break;
     case CMD_JUMP2DFU:
         // 确认包，无需额外处理
         break;
