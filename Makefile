@@ -88,7 +88,7 @@ ALL_OBJS  := $(CPP_OBJS) $(MOC_OBJS)
 # ======================================================================
 #  目标
 # ======================================================================
-.PHONY: all clean run
+.PHONY: all clean run deploy
 
 all: $(BLD_DIR) $(TARGET)
 
@@ -129,6 +129,18 @@ clean:
 
 run: $(TARGET)
 	./$(TARGET)
+
+deploy: $(TARGET)
+	@echo "[DEPLOY] Packaging for distribution..."
+	rm -rf deploy
+	mkdir -p deploy
+	cp $(TARGET) deploy/
+	windeployqt6 --no-translations --no-compiler-runtime --no-system-d3d-compiler deploy/$(TARGET)
+	cp /c/msys64/mingw64/bin/libhidapi-0.dll deploy/
+	cp /c/msys64/mingw64/bin/libwinpthread-1.dll deploy/
+	cp /c/msys64/mingw64/bin/libstdc++-6.dll deploy/
+	cp /c/msys64/mingw64/bin/libgcc_s_seh-1.dll deploy/
+	@echo "[DEPLOY] Done → deploy/ folder"
 
 # 打印诊断信息
 info:
