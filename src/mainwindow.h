@@ -1,6 +1,9 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
+#define APP_VERSION  "V1.0.1"
+#define APP_VERSION_NUM 0x00010001  // major.minor.patch
+
 #include <QMainWindow>
 
 #include <QCheckBox>
@@ -86,6 +89,7 @@ private slots:
     void onWriteCardTimeout();
     void doWriteBlock2();
     void doWriteBlock3();
+    void doWriteAdv();
     void showWriteCardError(uint8_t status);
 
 private:
@@ -216,6 +220,7 @@ private:
 
     /* 状态栏 */
     QLabel     *m_lblStatusMsg;
+    QLabel     *m_lblVersion;
 
     /* 写卡 */
     QLineEdit  *m_writeCardInput;
@@ -227,6 +232,14 @@ private:
     bool        m_writeCardPending;
     int         m_writeCardStep;   // 0=block2, 1=block3
     QByteArray  m_writeCardSerial;
+    uint8_t     m_fwVersion;       // 固件版本 (高4位=主, 低4位=次)
+    bool        m_writeCardAdv;    // 高级写卡模式
+    QLineEdit  *m_advSector;
+    QLineEdit  *m_advBlock;
+    QLineEdit  *m_advKeyA;
+    QLineEdit  *m_advKeyB;
+    QLineEdit  *m_advData;
+    QLabel     *m_advHint;
     QPushButton *m_btnWriteCardTab;  // 左侧切换到写卡页的按钮
     uint8_t     m_lastCardType;       // 最近一次检测到的卡种
 };
