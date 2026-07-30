@@ -647,7 +647,7 @@ QWidget* MainWindow::buildAdvTab()
     grid->addWidget(m_advHint, 4, 0, 1, 4);
 
     // 高级写入按钮
-    m_advWriteBtn = new QPushButton(QString::fromUtf8("直接写入 (不等待卡片)"), tab);
+    m_advWriteBtn = new QPushButton(QString::fromUtf8("直接写入"), tab);
     m_advWriteBtn->setObjectName(QStringLiteral("btnPrimary"));
     m_advWriteBtn->setStyleSheet(QStringLiteral(
         "QPushButton#btnPrimary { background-color: #E65100; color: white;"
