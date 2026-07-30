@@ -34,6 +34,7 @@
 
 #include "flashdata.h"
 #include "hidworker.h"
+#include "banapasscard.h"
 
 class MainWindow : public QMainWindow
 {

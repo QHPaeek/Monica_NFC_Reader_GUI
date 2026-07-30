@@ -1043,6 +1043,7 @@ QString MainWindow::cardTypeName(uint8_t cardType)
         case Card_Tunion:        return QStringLiteral("T-Union (14443-A)");
         case Card_Jubeat:        return QStringLiteral("Jubeat (MIFARE)");
         case Card_Unknow_Mifare: return QStringLiteral("Unknown MIFARE");
+        case Card_Other_Felica:  return QStringLiteral("Other FeliCa");
         case Card_Blank_Mifare:  return QStringLiteral("Blank MIFARE");
         default:                 return QStringLiteral("Unknown (0x%1)")
                                         .arg(cardType, 2, 16, QLatin1Char('0'));
@@ -1069,6 +1070,7 @@ QString MainWindow::extractUid(uint8_t cardType, const QByteArray &rawData)
 
     case Card_AIC:
     case Card_EPass:
+    case Card_Other_Felica:
         // Card_RawData[0] 前 8 字节 = UID/IDm
         if (rawData.size() < 8) break;
         {
@@ -1125,7 +1127,17 @@ QString MainWindow::extractCardNumber(uint8_t cardType,
         len    = 10;
         break;
     case Card_Bana_Old:
-        return QString();   // 加密卡号, 不显示
+        // Card_RawData[1]/[2] 含加密数据, 用 Blowfish 解密
+        // Block 1 = rawData[16..31], 16 字节 header
+        if (rawData.size() >= 32) {
+            int keynum = -1;
+            const uint8_t *block1 = (const uint8_t*)rawData.constData() + 16;
+            int32_t namcoId = banapassDecode(block1, &keynum);
+            if (keynum >= 0) {
+                return banapassEncodeAccessCode(keynum, (uint32_t)namcoId);
+            }
+        }
+        return QString();   // 解密失败
     case Card_AIC:
         // Card_RawData[1] (offset 16), 16 字节加密数据
         if (rawData.size() < 16 + 16) return QString();
@@ -1133,6 +1145,11 @@ QString MainWindow::extractCardNumber(uint8_t cardType,
             uint8_t spad[16];
             memcpy(spad, rawData.constData() + 16, 16);
             decryptAicAccessCode(spad);
+            // 新规则: 首字节非 0 → 用 IDM 转卡号
+            if (spad[0] != 0x00) {
+                return idmToAccessCode(
+                    reinterpret_cast<const uint8_t*>(rawData.constData()));
+            }
             // 去掉前导零
             int start = 0;
             while (start < 16 && spad[start] == 0x00)
@@ -1143,16 +1160,21 @@ QString MainWindow::extractCardNumber(uint8_t cardType,
                 for (int i = start; i < 16; ++i)
                     hex.append(QStringLiteral("%1")
                         .arg(spad[i], 2, 16, QLatin1Char('0')));
-                // 前导零必须 >= 6 字节 (12 hex 字符), 且卡号必须是纯十进制
                 if (start >= 6 && isValidDecimalCardNum(hex))
                     return formatCardNumber(hex.toUpper());
             }
-            // 不合格 → 用 UID 构造虚拟卡号
+            // fallback: UID 构造卡号
             if (rawData.size() >= 8)
                 return uidToAccessCode(
                     reinterpret_cast<const uint8_t*>(rawData.constData()));
         }
         break;
+    case Card_Other_Felica:
+        // UID 前 8 字节 → IDM 转卡号
+        if (rawData.size() >= 8)
+            return idmToAccessCode(
+                reinterpret_cast<const uint8_t*>(rawData.constData()));
+        return QString();
     case Card_EPass:
     case Card_Nesica:
     case Card_Tunion:

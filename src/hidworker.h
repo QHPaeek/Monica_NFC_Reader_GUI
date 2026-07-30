@@ -51,6 +51,7 @@ enum AimeIOCardType : uint8_t {
     Card_Tunion        = 0x07,
     Card_Jubeat        = 0x08,
     Card_Unknow_Mifare = 0x09,
+    Card_Other_Felica  = 0x0A,
     Card_Blank_Mifare  = 0x10,
 };
 
