@@ -91,6 +91,7 @@ private slots:
     void doWriteBlock3();
     void doWriteAdv();
     void showWriteCardError(uint8_t status);
+    void showWriteCardAdvError(uint8_t status);
 
 private:
     /* ---- UI 初始化 ---- */
@@ -107,6 +108,8 @@ private:
     QWidget* createSpiceTab();
     QWidget* createNamcoTab();
     QWidget* createSystemTab();
+    QWidget* buildNormalTab();
+    QWidget* buildAdvTab();
 
     /* Bit ↔ Checkbox */
     void    bindCheckboxesToBits(uint8_t byteVal,
@@ -227,13 +230,14 @@ private:
     QLabel     *m_writeCardHint;
     QPushButton *m_writeCardBtn;
     QPushButton *m_writeCardBackBtn;
+    QPushButton *m_advWriteBtn;
     QDialog    *m_writeCardDialog;
     QTimer     *m_writeCardTimer;
     bool        m_writeCardPending;
     int         m_writeCardStep;   // 0=block2, 1=block3
     QByteArray  m_writeCardSerial;
     uint8_t     m_fwVersion;       // 固件版本 (高4位=主, 低4位=次)
-    bool        m_writeCardAdv;    // 高级写卡模式
+    QTabWidget *m_writeCardTabs;   // 写卡子标签页: 普通 | 高级
     QLineEdit  *m_advSector;
     QLineEdit  *m_advBlock;
     QLineEdit  *m_advKeyA;

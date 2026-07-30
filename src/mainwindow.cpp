@@ -117,7 +117,8 @@ MainWindow::MainWindow(QWidget *parent)
     , m_writeCardPending(false)
     , m_writeCardStep(0)
     , m_fwVersion(0)
-    , m_writeCardAdv(false)
+    , m_writeCardTabs(nullptr)
+    , m_advWriteBtn(nullptr)
     , m_advSector(nullptr)
     , m_advBlock(nullptr)
     , m_advKeyA(nullptr)
@@ -512,33 +513,28 @@ QWidget* MainWindow::buildDfuPage()
 }
 
 /* ---- 写 Aime 卡页面 ---- */
-QWidget* MainWindow::buildWriteCardPage()
-{
-    m_writeCardAdv = false;
 
-    QWidget *w = new QWidget(this);
-    QVBoxLayout *vbox = new QVBoxLayout(w);
-    vbox->setContentsMargins(24, 24, 24, 24);
+QWidget* MainWindow::buildNormalTab()
+{
+    QWidget *tab = new QWidget(this);
+    QVBoxLayout *vbox = new QVBoxLayout(tab);
+    vbox->setContentsMargins(0, 12, 0, 0);
     vbox->setSpacing(10);
 
-    QLabel *title = new QLabel(QString::fromUtf8("写入 Aime 卡号"), w);
-    title->setObjectName(QStringLiteral("sectionTitle"));
-
     QLabel *desc = new QLabel(QString::fromUtf8(
-        "此功能用于向空白 MIFARE 卡写入 Aime 卡号。\n"
+        "向空白 MIFARE 卡的 0 扇区写入 Aime 卡号和密钥。\n"
         "⏹ 只能写入空白卡，已有数据的卡无法覆盖\n"
         "⏹ 写入操作不可逆，请务必确认卡号无误\n"
-        "⏹ 卡号必须为 20 位纯数字，不能以 3 开头"), w);
+        "⏹ 卡号必须为 20 位纯数字，不能以 3 开头"), tab);
     desc->setObjectName(QStringLiteral("tabDesc"));
     desc->setWordWrap(true);
     desc->setStyleSheet(QStringLiteral(
         "QLabel#tabDesc { color: #D32F2F; font-size: 13px; }"));
 
-    // 输入框
     QHBoxLayout *inputRow = new QHBoxLayout();
-    QLabel *inputLabel = new QLabel(QString::fromUtf8("卡号 (20位):"), w);
+    QLabel *inputLabel = new QLabel(QString::fromUtf8("卡号 (20位):"), tab);
     inputLabel->setStyleSheet(QStringLiteral("font-weight: bold;"));
-    m_writeCardInput = new QLineEdit(w);
+    m_writeCardInput = new QLineEdit(tab);
     m_writeCardInput->setPlaceholderText(
         QString::fromUtf8("请输入 20 位纯数字卡号"));
     m_writeCardInput->setMaxLength(20);
@@ -549,12 +545,10 @@ QWidget* MainWindow::buildWriteCardPage()
     inputRow->addWidget(inputLabel);
     inputRow->addWidget(m_writeCardInput, 1);
 
-    // 提示标签
-    m_writeCardHint = new QLabel(w);
+    m_writeCardHint = new QLabel(tab);
     m_writeCardHint->setStyleSheet(QStringLiteral(
         "color: #D32F2F; font-size: 12px; min-height: 18px;"));
 
-    // 输入验证
     connect(m_writeCardInput, &QLineEdit::textChanged, this,
             [this](const QString &text) {
         if (text.isEmpty()) {
@@ -591,74 +585,112 @@ QWidget* MainWindow::buildWriteCardPage()
         m_writeCardBtn->setEnabled(true);
     });
 
-    // ========================================
-    // 高级写卡模式
-    // ========================================
-    QCheckBox *advToggle = new QCheckBox(
-        QString::fromUtf8("高级写卡模式"), w);
-    advToggle->setToolTip(QString::fromUtf8(
-        "自定义扇区/区块/密钥/数据，操作失误可能导致卡片写死"));
+    vbox->addWidget(desc);
+    vbox->addLayout(inputRow);
+    vbox->addWidget(m_writeCardHint);
+    vbox->addStretch();
+    return tab;
+}
 
-    QWidget *advPanel = new QWidget(w);
-    advPanel->setVisible(false);
-    QGridLayout *advGrid = new QGridLayout(advPanel);
-    advGrid->setContentsMargins(0, 8, 0, 0);
-    advGrid->setSpacing(6);
+QWidget* MainWindow::buildAdvTab()
+{
+    QWidget *tab = new QWidget(this);
+    QVBoxLayout *vbox = new QVBoxLayout(tab);
+    vbox->setContentsMargins(0, 12, 0, 0);
+    vbox->setSpacing(10);
+
+    QLabel *desc = new QLabel(QString::fromUtf8(
+        "高级模式：自定义扇区/区块/密钥/数据。\n"
+        "⚠ 不管卡片状态如何，点击即发送写命令\n"
+        "⚠ 不会等待空白卡，不检查卡是否在读卡器上\n"
+        "⚠ 操作失误可能致卡片写死，请确定后操作"), tab);
+    desc->setObjectName(QStringLiteral("tabDesc"));
+    desc->setWordWrap(true);
+    desc->setStyleSheet(QStringLiteral(
+        "QLabel#tabDesc { color: #E65100; font-size: 13px; }"));
+
+    QGridLayout *grid = new QGridLayout();
+    grid->setSpacing(6);
 
     auto advStyle = QStringLiteral(
         "QLineEdit { font-family: Consolas,monospace; font-size: 14px;"
         "padding: 6px; border: 1px solid #aaa; border-radius: 3px; }"
         "QLineEdit:focus { border-color: #0078D4; }");
 
-    advGrid->addWidget(new QLabel(QString::fromUtf8("扇区 (0-15):"), w), 0, 0);
-    m_advSector = new QLineEdit(QStringLiteral("0"), w);
+    grid->addWidget(new QLabel(QString::fromUtf8("扇区 (0-15):"), tab), 0, 0);
+    m_advSector = new QLineEdit(QStringLiteral("0"), tab);
     m_advSector->setFixedWidth(60); m_advSector->setStyleSheet(advStyle);
-    advGrid->addWidget(m_advSector, 0, 1);
+    grid->addWidget(m_advSector, 0, 1);
 
-    advGrid->addWidget(new QLabel(QString::fromUtf8("区块 (0-3):"), w), 0, 2);
-    m_advBlock = new QLineEdit(QStringLiteral("2"), w);
+    grid->addWidget(new QLabel(QString::fromUtf8("区块 (0-3):"), tab), 0, 2);
+    m_advBlock = new QLineEdit(QStringLiteral("2"), tab);
     m_advBlock->setFixedWidth(60); m_advBlock->setStyleSheet(advStyle);
-    advGrid->addWidget(m_advBlock, 0, 3);
+    grid->addWidget(m_advBlock, 0, 3);
 
-    advGrid->addWidget(new QLabel(QString::fromUtf8("KeyA (12位HEX):"), w), 1, 0);
-    m_advKeyA = new QLineEdit(QStringLiteral("FFFFFFFFFFFF"), w);
+    grid->addWidget(new QLabel(QString::fromUtf8("KeyA (12位HEX):"), tab), 1, 0);
+    m_advKeyA = new QLineEdit(QStringLiteral("FFFFFFFFFFFF"), tab);
     m_advKeyA->setStyleSheet(advStyle);
-    advGrid->addWidget(m_advKeyA, 1, 1, 1, 3);
+    grid->addWidget(m_advKeyA, 1, 1, 1, 3);
 
-    advGrid->addWidget(new QLabel(QString::fromUtf8("KeyB (12位HEX):"), w), 2, 0);
-    m_advKeyB = new QLineEdit(QStringLiteral("FFFFFFFFFFFF"), w);
+    grid->addWidget(new QLabel(QString::fromUtf8("KeyB (12位HEX):"), tab), 2, 0);
+    m_advKeyB = new QLineEdit(QStringLiteral("FFFFFFFFFFFF"), tab);
     m_advKeyB->setStyleSheet(advStyle);
-    advGrid->addWidget(m_advKeyB, 2, 1, 1, 3);
+    grid->addWidget(m_advKeyB, 2, 1, 1, 3);
 
-    advGrid->addWidget(new QLabel(QString::fromUtf8("数据 (32位HEX):"), w), 3, 0);
-    m_advData = new QLineEdit(QStringLiteral("00000000000000000000000000000000"), w);
+    grid->addWidget(new QLabel(QString::fromUtf8("数据 (32位HEX):"), tab), 3, 0);
+    m_advData = new QLineEdit(QStringLiteral("00000000000000000000000000000000"), tab);
     m_advData->setStyleSheet(advStyle);
-    advGrid->addWidget(m_advData, 3, 1, 1, 3);
+    grid->addWidget(m_advData, 3, 1, 1, 3);
 
-    m_advHint = new QLabel(w);
+    m_advHint = new QLabel(tab);
     m_advHint->setStyleSheet(QStringLiteral("color: #D32F2F; font-size: 11px; min-height: 16px;"));
-    advGrid->addWidget(m_advHint, 4, 0, 1, 4);
+    grid->addWidget(m_advHint, 4, 0, 1, 4);
 
-    connect(advToggle, &QCheckBox::toggled, this, [this, advPanel](bool checked) {
-        if (checked) {
-            auto ans = QMessageBox::warning(this,
-                QString::fromUtf8("高级写卡模式"),
-                QString::fromUtf8(
-                    "高级写卡模式下，如操作失误有可能导致卡片写死，\n"
-                    "请确定后再进行操作。"),
-                QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
-            if (ans != QMessageBox::Ok) {
-                m_writeCardAdv = false;
-                // 需要取消信号 -> 阻塞信号后重置
-                QCheckBox *cb = qobject_cast<QCheckBox*>(sender());
-                if (cb) { cb->blockSignals(true); cb->setChecked(false); cb->blockSignals(false); }
-                return;
-            }
-            m_writeCardAdv = true;
+    // 高级写入按钮
+    m_advWriteBtn = new QPushButton(QString::fromUtf8("直接写入 (不等待卡片)"), tab);
+    m_advWriteBtn->setObjectName(QStringLiteral("btnPrimary"));
+    m_advWriteBtn->setStyleSheet(QStringLiteral(
+        "QPushButton#btnPrimary { background-color: #E65100; color: white;"
+        "font-weight: bold; padding: 10px 24px; border-radius: 4px; }"
+        "QPushButton#btnPrimary:hover { background-color: #BF360C; }"));
+    connect(m_advWriteBtn, &QPushButton::clicked,
+            this, &MainWindow::doWriteAdv);
+
+    vbox->addWidget(desc);
+    vbox->addLayout(grid);
+    vbox->addStretch();
+    vbox->addWidget(m_advWriteBtn, 0, Qt::AlignRight);
+    return tab;
+}
+
+QWidget* MainWindow::buildWriteCardPage()
+{
+    QWidget *w = new QWidget(this);
+    QVBoxLayout *vbox = new QVBoxLayout(w);
+    vbox->setContentsMargins(24, 24, 24, 24);
+    vbox->setSpacing(10);
+
+    QLabel *title = new QLabel(QString::fromUtf8("写入 Aime 卡号"), w);
+    title->setObjectName(QStringLiteral("sectionTitle"));
+
+    m_writeCardTabs = new QTabWidget(w);
+    m_writeCardTabs->addTab(buildNormalTab(),
+        QString::fromUtf8("普通写卡"));
+    m_writeCardTabs->addTab(buildAdvTab(),
+        QString::fromUtf8("高级写卡"));
+
+    // 切换标签页时更新按钮状态
+    connect(m_writeCardTabs, &QTabWidget::currentChanged, this,
+            [this](int idx) {
+        if (idx == 0) {
+            m_writeCardBtn->setVisible(true);
+            m_writeCardBtn->setEnabled(
+                !m_writeCardInput->text().isEmpty()
+                && m_writeCardInput->text().length() == 20
+                && !m_writeCardInput->text().startsWith(QLatin1Char('3')));
         } else {
-            m_writeCardAdv = false;
+            m_writeCardBtn->setVisible(false);
         }
-        advPanel->setVisible(checked);
     });
 
     // 按钮行
@@ -674,24 +706,15 @@ QWidget* MainWindow::buildWriteCardPage()
         QString::fromUtf8("写入卡片"), w);
     m_writeCardBtn->setObjectName(QStringLiteral("btnPrimary"));
     m_writeCardBtn->setEnabled(false);
-    connect(m_writeCardBtn, &QPushButton::clicked, this, [this]() {
-        if (m_writeCardAdv) {
-            doWriteAdv();
-        } else {
-            onWriteCardClicked();
-        }
-    });
+    connect(m_writeCardBtn, &QPushButton::clicked,
+            this, &MainWindow::onWriteCardClicked);
 
     btnRow->addWidget(m_writeCardBackBtn);
     btnRow->addStretch();
     btnRow->addWidget(m_writeCardBtn);
 
     vbox->addWidget(title);
-    vbox->addWidget(desc);
-    vbox->addLayout(inputRow);
-    vbox->addWidget(m_writeCardHint);
-    vbox->addWidget(advToggle);
-    vbox->addWidget(advPanel);
+    vbox->addWidget(m_writeCardTabs);
     vbox->addStretch();
     vbox->addLayout(btnRow);
 
@@ -2046,7 +2069,7 @@ void MainWindow::onWriteCardResult(uint8_t status)
                 QString::fromUtf8("写入成功"),
                 QString::fromUtf8("高级写卡操作成功完成。"));
         } else {
-            showWriteCardError(status);
+            showWriteCardAdvError(status);
         }
     } else {
         // Block 3 写完 → 最终结果
@@ -2088,6 +2111,39 @@ void MainWindow::showWriteCardError(uint8_t status)
         QMessageBox::critical(this,
             QString::fromUtf8("写入失败"),
             QString::fromUtf8("数据写入失败。可能是卡片损坏或放置不稳定。"));
+        break;
+    default:
+        QMessageBox::critical(this,
+            QString::fromUtf8("写入失败"),
+            QString::fromUtf8("读卡器返回未知错误 (0x%1)。")
+                .arg(status, 2, 16, QLatin1Char('0')));
+        break;
+    }
+}
+
+void MainWindow::showWriteCardAdvError(uint8_t status)
+{
+    switch (status) {
+    case 0x01:
+        QMessageBox::warning(this,
+            QString::fromUtf8("写入失败"),
+            QString::fromUtf8("读卡器未检测到任何卡片。\n请确认卡片已放置好。"));
+        break;
+    case 0x02:
+        QMessageBox::warning(this,
+            QString::fromUtf8("写入失败"),
+            QString::fromUtf8("卡片在操作过程中被移走。\n请保持卡片稳定。"));
+        break;
+    case 0x03:
+    case 0x04:
+        QMessageBox::warning(this,
+            QString::fromUtf8("写入失败"),
+            QString::fromUtf8("卡片密钥验证失败 (KeyA/KeyB)。\n请检查输入的密钥是否正确。"));
+        break;
+    case 0x05:
+        QMessageBox::critical(this,
+            QString::fromUtf8("写入失败"),
+            QString::fromUtf8("数据写入失败。\n可能是卡片损坏或区块已锁定。"));
         break;
     default:
         QMessageBox::critical(this,
