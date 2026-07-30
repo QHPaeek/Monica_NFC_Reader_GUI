@@ -1134,7 +1134,8 @@ QString MainWindow::extractCardNumber(uint8_t cardType,
             const uint8_t *block1 = (const uint8_t*)rawData.constData() + 16;
             int32_t namcoId = banapassDecode(block1, &keynum);
             if (keynum >= 0) {
-                return banapassEncodeAccessCode(keynum, (uint32_t)namcoId);
+                return formatCardNumber(
+                    banapassEncodeAccessCode(keynum, (uint32_t)namcoId));
             }
         }
         return QString();   // 解密失败
@@ -1147,8 +1148,9 @@ QString MainWindow::extractCardNumber(uint8_t cardType,
             decryptAicAccessCode(spad);
             // 新规则: 首字节非 0 → 用 IDM 转卡号
             if (spad[0] != 0x00) {
-                return idmToAccessCode(
-                    reinterpret_cast<const uint8_t*>(rawData.constData()));
+                return formatCardNumber(
+                    idmToAccessCode(
+                        reinterpret_cast<const uint8_t*>(rawData.constData())));
             }
             // 去掉前导零
             int start = 0;
@@ -1172,8 +1174,9 @@ QString MainWindow::extractCardNumber(uint8_t cardType,
     case Card_Other_Felica:
         // UID 前 8 字节 → IDM 转卡号
         if (rawData.size() >= 8)
-            return idmToAccessCode(
-                reinterpret_cast<const uint8_t*>(rawData.constData()));
+            return formatCardNumber(
+                idmToAccessCode(
+                    reinterpret_cast<const uint8_t*>(rawData.constData())));
         return QString();
     case Card_EPass:
     case Card_Nesica:
