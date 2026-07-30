@@ -1187,6 +1187,13 @@ QString MainWindow::extractCardNumber(uint8_t cardType,
         len    = 10;
         break;
     case Card_Jubeat:
+        // 4 字节 UID → hex_to_accesscode (同 EPass 逻辑)
+        if (rawData.size() >= 4) {
+            uint8_t buf[8] = {};
+            memcpy(buf, rawData.constData(), 4);   // 4 字节 UID, 后 4 字节补 0
+            return uidToAccessCode(buf);
+        }
+        return QString();
     case Card_Unknow_Mifare:
     case Card_Blank_Mifare:
         return QString();
