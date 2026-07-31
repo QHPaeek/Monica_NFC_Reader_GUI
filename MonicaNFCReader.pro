@@ -7,13 +7,16 @@ SOURCES += \
     src/main.cpp \
     src/mainwindow.cpp \
     src/hidworker.cpp \
-    src/banapasscard.cpp
+    src/banapasscard.cpp \
+    src/accesscode.cpp
 
 HEADERS += \
     src/mainwindow.h \
     src/hidworker.h \
     src/flashdata.h \
-    src/banapasscard.h
+    src/banapasscard.h \
+    src/accesscode.h \
+    src/sbox.h
 
 RESOURCES += resources.qrc
 
