@@ -4,3 +4,20 @@ build/
 *.o
 deploy/
 MonicaNFCReader_Setup.exe
+
+# ---- SVG 生成产物 (运行时生成, 不入库) ----
+card.svg
+_tmp.svg
+_o.svg
+_t.svg
+test_svg.svg
+output.svg
+card_*.svg
+tools/test.svg
+
+# ---- 发卡记录数据库 (含真实卡号, 不入库) ----
+card_records.csv
+
+# ---- Node 依赖 (如不再使用 Node 版 SVG 生成器可删除整个目录) ----
+tools/node_modules/
+tools/node/

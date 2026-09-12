@@ -27,16 +27,6 @@ static QString formatCardNumber(const QString &hex)
     return fmt;
 }
 
-/* 检查 HEX 字符串是否为纯十进制卡号 (不含 A-F) */
-static bool isValidDecimalCardNum(const QString &hex)
-{
-    for (const QChar &c : hex) {
-        if (c >= QLatin1Char('A') && c <= QLatin1Char('F'))
-            return false;
-    }
-    return true;
-}
-
 /* UID → 虚拟卡号 (hex_to_accesscode, 来自 STM32 固件)
  * 取 8 字节 UID, 转换成 10 字节 access code, 20 位 HEX 显示.
  */
@@ -68,6 +58,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_hid(new HIDWorker(nullptr))
     , m_connected(false)
     , m_langEn(false)
+    , m_flashReadTimer(nullptr)
     , m_inDfuMode(false)
     , m_netManager(new QNetworkAccessManager(this))
     , m_dlProgress(nullptr)
@@ -991,6 +982,52 @@ void MainWindow::updateConnectionUI(bool connected)
 }
 
 // ====================================================================
+//  Flash 读取看门狗
+//  连接成功后固件若在 FLASH_READ_TIMEOUT_MS 内不回 Flash_Read 响应,
+//  判定为读卡器死机 (硬件原因) → 弹窗提示 + 复位为未连接状态。
+// ====================================================================
+
+void MainWindow::armFlashReadTimeout()
+{
+    if (!m_flashReadTimer) {
+        m_flashReadTimer = new QTimer(this);
+        m_flashReadTimer->setSingleShot(true);
+        connect(m_flashReadTimer, &QTimer::timeout,
+                this, &MainWindow::onFlashReadTimeout);
+    }
+    m_flashReadTimer->start(FLASH_READ_TIMEOUT_MS);
+}
+
+void MainWindow::disarmFlashReadTimeout()
+{
+    if (m_flashReadTimer)
+        m_flashReadTimer->stop();
+}
+
+void MainWindow::onFlashReadTimeout()
+{
+    if (!m_connected) return;
+
+    // 先复位连接 (stop() 内部会发出 deviceDisconnected → 状态复位为未连接)
+    m_hid->stop();
+    m_btnConnect->setEnabled(true);
+
+    QMessageBox::warning(this,
+        trC(QStringLiteral("连接超时"), QStringLiteral("Connection Timeout")),
+        trC(QString::fromUtf8(
+                "连接超时，读卡器可能已经死机（硬件原因）。\n\n"
+                "请给读卡器断电后重新上电，再点击「连接」重试。"),
+            QStringLiteral(
+                "Connection timeout. The reader may have hung (hardware issue).\n\n"
+                "Please power-cycle the reader and click Connect to retry.")));
+
+    // 放在弹窗之后, 避免被 deviceDisconnected 的 "设备已断开" 覆盖
+    m_lblStatusMsg->setText(trC(
+        QStringLiteral("连接超时，读卡器可能已经死机（硬件原因）"),
+        QStringLiteral("Timeout — the reader may have hung (hardware issue)")));
+}
+
+// ====================================================================
 //  卡片 UID / 卡号 提取
 // ====================================================================
 
@@ -1109,30 +1146,16 @@ QString MainWindow::extractCardNumber(uint8_t cardType,
         {
             uint8_t spad[16];
             memcpy(spad, rawData.constData() + 16, 16);
-            bool valid = decrypt_accesscode(spad);
-            // 前 6 字节非全零 → 解密无效, 用 IDM 转卡号
-            if (!valid) {
-                return formatCardNumber(
-                    idmToAccessCode(
-                        reinterpret_cast<const uint8_t*>(rawData.constData())));
-            }
-            // 去掉前导零
-            int start = 0;
-            while (start < 16 && spad[start] == 0x00)
-                ++start;
-            int validLen = 16 - start;
-            if (validLen > 0) {
-                QString hex;
-                for (int i = start; i < 16; ++i)
-                    hex.append(QStringLiteral("%1")
-                        .arg(spad[i], 2, 16, QLatin1Char('0')));
-                if (start >= 6 && isValidDecimalCardNum(hex))
-                    return formatCardNumber(hex.toUpper());
-            }
-            // fallback: UID 构造卡号
-            if (rawData.size() >= 8)
-                return uidToAccessCode(
-                    reinterpret_cast<const uint8_t*>(rawData.constData()));
+            // rawData[0..7] = FeliCa IDm (Card_RawData[0] 前半)
+            decrypt_accesscode(spad,
+                reinterpret_cast<const uint8_t*>(rawData.constData()));
+            // 解密后 spad[6..15] 即为 20 位 BCD 卡号;
+            // 若 spad[6] 不是合法 BCD 十位, decrypt_accesscode 已用 IDm 重新填充
+            QString hex;
+            for (int i = 6; i < 16; ++i)
+                hex.append(QStringLiteral("%1")
+                    .arg(spad[i], 2, 16, QLatin1Char('0')));
+            return formatCardNumber(hex.toUpper());
         }
         break;
     case Card_Other_Felica:
@@ -1227,6 +1250,7 @@ void MainWindow::onConnectClicked()
         QStringLiteral("正在搜索设备..."),
         QStringLiteral("Searching for device...")));
     m_btnConnect->setEnabled(false);
+    disarmFlashReadTimeout();
     m_hid->stop();
     m_hid->start();
 }
@@ -1241,6 +1265,7 @@ void MainWindow::onReadSettings()
     m_lblStatusMsg->setText(trC(
         QStringLiteral("正在从设备读取设置..."),
         QStringLiteral("Reading settings from device...")));
+    armFlashReadTimeout();          // 手动读取同样带超时
     m_hid->requestFlashRead();
 }
 
@@ -1789,11 +1814,13 @@ void MainWindow::onDeviceConnected(const QString &desc)
     m_lblStatusMsg->setText(trC(
         QStringLiteral("已连接: %1  |  正在读取设置...").arg(desc),
         QStringLiteral("Connected: %1  |  Reading settings...").arg(desc)));
+    armFlashReadTimeout();          // 启动读取超时看门狗
     m_hid->requestFlashRead();
 }
 
 void MainWindow::onDeviceDisconnected()
 {
+    disarmFlashReadTimeout();
     m_connected = false;
     m_btnConnect->setEnabled(true);
     updateConnectionUI(false);
@@ -1820,6 +1847,7 @@ void MainWindow::onDeviceDisconnected()
 
 void MainWindow::onDeviceError(const QString &msg)
 {
+    disarmFlashReadTimeout();
     m_btnConnect->setEnabled(true);
     QMessageBox::warning(this,
         trC(QStringLiteral("设备错误"), QStringLiteral("Device Error")), msg);
@@ -1861,6 +1889,7 @@ void MainWindow::onCardDetected(uint8_t cardType, const QByteArray &rawData)
 void MainWindow::onFlashDataRead(const FlashData &data,
                                  uint8_t readerType, uint8_t fwVersion)
 {
+    disarmFlashReadTimeout();       // 收到响应, 取消超时看门狗
     m_flashData = data;
     m_fwVersion = fwVersion;
     populateSettingsUI(data);

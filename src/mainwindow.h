@@ -4,6 +4,9 @@
 #define APP_VERSION  "V1.0.3"
 #define APP_VERSION_NUM 0x00010001  // major.minor.patch
 
+/* 连接后读取 Flash 的超时时间 (ms) — 超时视为读卡器死机 */
+#define FLASH_READ_TIMEOUT_MS  3000
+
 #include <QMainWindow>
 
 #include <QCheckBox>
@@ -61,6 +64,7 @@ private slots:
     void onFlashDataRead(const FlashData &data, uint8_t readerType,
                          uint8_t fwVersion);
     void onFlashDataWritten(bool ok);
+    void onFlashReadTimeout();      /* 读取 Flash 超时 → 判定读卡器死机 */
 
     /* 语言切换 */
     void onToggleLanguage();
@@ -134,6 +138,10 @@ private:
     void updateConnectionUI(bool connected);
     QString trC(const QString &zh, const QString &en) const;
 
+    /* Flash 读取超时看门狗 */
+    void armFlashReadTimeout();
+    void disarmFlashReadTimeout();
+
     /* 卡种信息 */
     static QString cardTypeName(uint8_t cardType);
     static QString extractUid(uint8_t cardType, const QByteArray &rawData);
@@ -145,6 +153,7 @@ private:
     FlashData   m_flashData;
     bool        m_connected;
     bool        m_langEn;
+    QTimer     *m_flashReadTimer;   /* Flash 读取超时看门狗 */
 
     /* ---- Header ---- */
     QLabel     *m_lblConnStatus;

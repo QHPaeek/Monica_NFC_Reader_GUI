@@ -16,13 +16,14 @@
 | **固件版本校验**                   | 固件低于 v0.5 自动禁用写卡功能，防止误操作                                                                          |
 | **LED 灯控制**                  | 实时调节读卡器 RGB 灯光颜色                                                                                  |
 | **DFU 固件更新**                 | 一键触发读卡器进入 DFU 模式，支持 dfu-util 刷写固件                                                                 |
+| **读取超时保护**                   | 连接后读取 Flash 若超时（默认 3 s）无响应，判定读卡器死机并弹窗提示，连接状态自动复位                                                  |
 
 ### 支持的卡片类型
 
 - **Aime (MIFARE)** — 明文卡号，20 位
 - **Banapass New (MIFARE)** — 明文卡号，20 位，3 开头
 - **Banapass Old (MIFARE)** — Blowfish 加密卡号，自动解密
-- **AIC (FeliCa)** — SPAD 解密卡号，首字节非零时走 IDM 转换
+- **AIC (FeliCa)** — SPAD 解密卡号；校验 `spad[6]` 是否为合法 BCD 十位（`0x50`–`0x59`，即卡号首位为 `5`），否则回退为 IDM 转换
 - **e-Pass (ISO15693)** — 8 字节 UID 转换卡号
 - **NESiCA (Ultralight)** — 7 字节 UID，明文卡号
 - **T-Union (14443-A)** — 4 字节 UID，明文卡号
@@ -232,7 +233,11 @@ CardReader/
 │   ├── mainwindow.h/.cpp    # 主窗口 GUI
 │   ├── hidworker.h/.cpp     # HID 通信线程
 │   ├── flashdata.h          # FlashData 数据结构
-│   └── banapasscard.h/.cpp  # Banapass 卡号解析
+│   ├── banapasscard.h/.cpp  # Banapass 卡号解析 (Blowfish)
+│   ├── accesscode.h/.cpp    # AIC SPAD 解密 + 卡号转换 (移植自固件)
+│   └── sbox.h               # S_BOX_INV 逆掩码表
+├── docs/
+│   └── AimeIO_Protocol.md   # AimeIO 协议原始文档
 ├── tools/
 │   └── hidtest.cpp          # HID 设备测试工具
 ├── Makefile                 # 构建入口

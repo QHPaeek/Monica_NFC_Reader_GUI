@@ -6,7 +6,7 @@
 #include "sbox.h"
 #include <cstring>
 
-bool decrypt_accesscode(uint8_t spad[16])
+void decrypt_accesscode(uint8_t spad[16], const uint8_t idm[8])
 {
     // 第一步: S_BOX_INV[8] 逆掩码, 覆盖全部 16 字节
     for (int i = 0; i < 16; i++)
@@ -35,8 +35,15 @@ bool decrypt_accesscode(uint8_t spad[16])
             spad[i] = S_BOX_INV[table % N_TABLES][spad[i]];
     }
 
-    // 前 6 字节全零 → 解密有效
-    return (spad[0] | spad[1] | spad[2] | spad[3] | spad[4] | spad[5]) == 0;
+    // 第四步: 校验解密结果
+    //   SPAD 前 6 字节疑似会放其他数据, 不能再用"前 6 字节全零"作为判据,
+    //   改为检查卡号首字节 spad[6] 是否为合法 BCD 十位 (AIC 卡号首位固定为 5)。
+    //   idm_to_accesscode 自身会清零 out[0..5], 并把 10 字节卡号写到 out[6..15],
+    //   因此直接传 spad 即可得到"6 个零 + 10 字节卡号"的完整 16 字节块。
+    if ((spad[6] < 0x50) || (spad[6] > 0x59)) {
+        memset(spad, 0, 6);
+        idm_to_accesscode(idm, spad);
+    }
 }
 
 void ascii_to_accesscode(const uint8_t *ascii_data, uint8_t *accesscode)
