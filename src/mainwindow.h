@@ -1,8 +1,8 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
-#define APP_VERSION  "V1.0.3"
-#define APP_VERSION_NUM 0x00010001  // major.minor.patch
+#define APP_VERSION  "V1.0.4"
+#define APP_VERSION_NUM 0x00010004  // major.minor.patch
 
 /* 连接后读取 Flash 的超时时间 (ms) — 超时视为读卡器死机 */
 #define FLASH_READ_TIMEOUT_MS  3000
