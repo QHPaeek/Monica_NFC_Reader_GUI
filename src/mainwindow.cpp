@@ -59,6 +59,9 @@ static QString uidToAccessCode(const uint8_t *uid8)
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_hid(new HIDWorker(nullptr))
+    , m_serial(new AimeSerialWorker(nullptr))
+    , m_transport(TransportNone)
+    , m_serialConnecting(false)
     , m_connected(false)
     , m_langEn(false)
     , m_flashReadTimer(nullptr)
@@ -131,6 +134,27 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_hid, &HIDWorker::rawDataSent,
             this, &MainWindow::onRawDataSent);
     connect(m_hid, &HIDWorker::rawDataReceived,
+            this, &MainWindow::onRawDataReceived);
+
+    /* ---- 串口 AimeIO 通道 (同一套信号) ---- */
+    m_serial->setParent(this);
+    connect(m_serial, &AimeSerialWorker::deviceConnected,
+            this, &MainWindow::onSerialConnected);
+    connect(m_serial, &AimeSerialWorker::deviceDisconnected,
+            this, &MainWindow::onSerialDisconnected);
+    connect(m_serial, &AimeSerialWorker::deviceError,
+            this, &MainWindow::onSerialError);
+    connect(m_serial, &AimeSerialWorker::cardDetected,
+            this, &MainWindow::onCardDetected);
+    connect(m_serial, &AimeSerialWorker::flashDataRead,
+            this, &MainWindow::onFlashDataRead);
+    connect(m_serial, &AimeSerialWorker::flashDataWritten,
+            this, &MainWindow::onFlashDataWritten);
+    connect(m_serial, &AimeSerialWorker::writeCardResult,
+            this, &MainWindow::onWriteCardResult);
+    connect(m_serial, &AimeSerialWorker::rawDataSent,
+            this, &MainWindow::onRawDataSent);
+    connect(m_serial, &AimeSerialWorker::rawDataReceived,
             this, &MainWindow::onRawDataReceived);
 
     setControlsEnabled(false);
@@ -1517,7 +1541,14 @@ void MainWindow::onDisconnectClicked()
 {
     m_bootVerifiedPort.clear();
     m_connectProbePending = false;
-    m_hid->stop();
+
+    m_serial->disconnectPort();   /* 串口通道 */
+    m_hid->stop();                /* HID 通道 */
+
+    m_transport = TransportNone;
+    m_connected = false;
+    updateConnectionUI(false);
+    setControlsEnabled(false);
     updateFirmwareEntryState();
 }
 
@@ -1527,7 +1558,7 @@ void MainWindow::onReadSettings()
         QStringLiteral("正在从设备读取设置..."),
         QStringLiteral("Reading settings from device...")));
     armFlashReadTimeout();          // 手动读取同样带超时
-    m_hid->requestFlashRead();
+    sendFlashRead();
 }
 
 void MainWindow::onWriteSettings()
@@ -1552,7 +1583,7 @@ void MainWindow::onWriteSettings()
     m_lblStatusMsg->setText(trC(
         QStringLiteral("正在写入设置..."),
         QStringLiteral("Writing settings to device...")));
-    m_hid->requestFlashWrite(data);
+    sendFlashWrite(data);
 }
 
 void MainWindow::onResetDefaults()
@@ -1587,7 +1618,7 @@ void MainWindow::onLedSliderChanged(int value)
 {
     if (!m_connected) return;
     uint8_t v = static_cast<uint8_t>(value);
-    m_hid->requestLedColor(v, v, v);
+    sendLed(v);
 }
 
 /* ---- 原始数据日志 ---- */
@@ -1761,6 +1792,26 @@ void MainWindow::onEnterBootloader()
         }
     }
 
+    /* 串口 AimeIO 通道: 直接在同一个串口上发 0x62, 端口号不会变 */
+    if (m_transport == TransportSerial) {
+        showEnterDialog(1, trC(
+            QString::fromUtf8("正在通过串口尝试进入 BOOTLOADER…"),
+            QStringLiteral("Trying to enter the bootloader over serial...")));
+        m_probeRetry = 0;
+
+        m_lblStatusMsg->setText(trC(
+            QString::fromUtf8("正在通过串口发送 JUMP2BOOT…"),
+            QStringLiteral("Sending JUMP2BOOT over serial...")));
+
+        m_serial->requestJumpToBoot();
+
+        /* 0x62 已经同步写出(waitForBytesWritten), 立刻释放串口。
+         * 否则 bootloader 的握手会因为端口被 AimeIO 连接占着而打不开。
+         */
+        m_serial->disconnectPort();
+        return;
+    }
+
     showEnterDialog(1, trC(
         QString::fromUtf8("正在尝试进入 BOOTLOADER…"),
         QStringLiteral("Trying to enter the bootloader...")));
@@ -1855,6 +1906,22 @@ void MainWindow::onEnterDfu()
 {
     if (m_bootBusy)
         return;
+
+    /* 串口通道禁止跳转 DFU (用户明确要求) */
+    if (m_transport == TransportSerial || !selectedSerialPort().isEmpty()) {
+        QMessageBox::warning(this,
+            trC(QString::fromUtf8("串口不支持 DFU"),
+                QStringLiteral("DFU Not Available Over Serial")),
+            trC(QString::fromUtf8(
+                    "串口通道不能跳转 DFU。\n\n"
+                    "DFU 只能通过 USB 进入。串口设备请使用 BOOTLOADER 升级；"
+                    "若设备已刷死，可手动置为 DFU 后用下方 DFU 区通过 USB 烧录。"),
+                QStringLiteral(
+                    "DFU is not available over the serial channel.\n\n"
+                    "DFU can only be entered over USB. Use the bootloader for serial "
+                    "devices, or put the device into DFU manually and flash it over USB.")));
+        return;
+    }
 
     if (dfuDevicePresent()) {
         QMessageBox::information(this,
@@ -2093,8 +2160,16 @@ void MainWindow::updateFirmwareEntryState()
      * bootHere 同时覆盖了"UART 上已握手确认"的情况,
      * 否则 UART 进 BOOT 后 DFU 按钮会错误地重新亮起。
      */
+    /* 串口通道不允许跳转 DFU (用户明确要求) */
+    const bool serialChannel = (m_transport == TransportSerial)
+                               || !selectedSerialPort().isEmpty();
+
     m_bootEnterBtn->setEnabled(!anyMode && !m_bootBusy);
-    m_dfuEnterBtn->setEnabled(!anyMode && !m_bootBusy);
+    m_dfuEnterBtn->setEnabled(!anyMode && !m_bootBusy && !serialChannel);
+    m_dfuEnterBtn->setToolTip(serialChannel
+        ? trC(QString::fromUtf8("串口通道不支持跳转 DFU"),
+              QStringLiteral("DFU is not available over the serial channel"))
+        : QString());
 
     if (bootHere) {
         m_bootStateLabel->setText(trC(
@@ -2393,11 +2468,12 @@ void MainWindow::onProbeFinished(bool ok, const QString &summary)
                 QString::fromUtf8("已连接 BOOTLOADER — %1").arg(probed),
                 QStringLiteral("Bootloader connected — %1").arg(probed)));
         } else {
+            /* 不是 BOOTLOADER → 按 AimeIO 串口通道再试一次 */
+            m_serialConnecting = true;
             m_lblStatusMsg->setText(trC(
-                QString::fromUtf8(
-                    "%1 未识别为 BOOTLOADER；可在「固件升级」页发送 JUMP2BOOT").arg(probed),
-                QStringLiteral(
-                    "%1 is not a bootloader; send JUMP2BOOT from the upgrade page").arg(probed)));
+                QString::fromUtf8("正在以 AimeIO 协议连接 %1 ...").arg(probed),
+                QStringLiteral("Connecting to %1 with AimeIO...").arg(probed)));
+            m_serial->connectPort(probed, configuredBaud());
         }
     }
 
@@ -2864,15 +2940,108 @@ void MainWindow::applyLanguage()
 
 void MainWindow::onDeviceConnected(const QString &desc)
 {
+    m_transport = TransportHid;
+    handleTransportConnected(desc, true);
+}
+
+void MainWindow::onSerialConnected(const QString &desc)
+{
+    m_transport = TransportSerial;
+    m_serialConnecting = false;
+    handleTransportConnected(desc, false);
+}
+
+void MainWindow::onSerialDisconnected()
+{
+    if (m_transport != TransportSerial)
+        return;
+
+    m_transport = TransportNone;
+    disarmFlashReadTimeout();
+    m_connected = false;
+    m_btnConnect->setEnabled(true);
+    updateConnectionUI(false);
+    setControlsEnabled(false);
+    clearCardDisplay();
+    m_lblFwVersion->setText(QStringLiteral("FW: --"));
+    m_lblReaderModel->hide();
+
+    /* 正在「进入 BOOTLOADER」流程时不要覆盖进度提示 */
+    if (m_enterMode == 0) {
+        m_lblStatusMsg->setText(trC(
+            QStringLiteral("串口连接已断开"),
+            QStringLiteral("Serial connection closed")));
+    }
+}
+
+void MainWindow::onSerialError(const QString &msg)
+{
+    m_serialConnecting = false;
+    m_transport = TransportNone;
+    disarmFlashReadTimeout();
+    m_connected = false;
+    m_btnConnect->setEnabled(true);
+    updateConnectionUI(false);
+    setControlsEnabled(false);
+
+    m_lblStatusMsg->setText(trC(
+        QStringLiteral("串口连接失败: %1").arg(msg),
+        QStringLiteral("Serial connection failed: %1").arg(msg)));
+}
+
+void MainWindow::handleTransportConnected(const QString &desc, bool needFlashRead)
+{
     m_connected = true;
     updateConnectionUI(true);
     setControlsEnabled(true);
     m_btnConnect->setEnabled(true);
+
     m_lblStatusMsg->setText(trC(
-        QStringLiteral("已连接: %1  |  正在读取设置...").arg(desc),
-        QStringLiteral("Connected: %1  |  Reading settings...").arg(desc)));
-    armFlashReadTimeout();          // 启动读取超时看门狗
-    m_hid->requestFlashRead();
+        QStringLiteral("已连接: %1").arg(desc),
+        QStringLiteral("Connected: %1").arg(desc)));
+
+    /* 串口通道在握手时已经发过 Flash_Read, 应答紧跟 deviceConnected 到达,
+     * 这里同样启动看门狗, 万一解析失败还能报超时。
+     */
+    armFlashReadTimeout();
+    if (needFlashRead)
+        sendFlashRead();
+}
+
+/* ---- 两个传输通道的统一出口 ---- */
+
+void MainWindow::sendFlashRead()
+{
+    if (m_transport == TransportHid)
+        m_hid->requestFlashRead();
+    else if (m_transport == TransportSerial)
+        m_serial->requestFlashRead();
+}
+
+void MainWindow::sendFlashWrite(const FlashData &data)
+{
+    if (m_transport == TransportHid)
+        sendFlashWrite(data);
+    else if (m_transport == TransportSerial)
+        m_serial->requestFlashWrite(data);
+}
+
+void MainWindow::sendLed(uint8_t value)
+{
+    if (m_transport == TransportHid)
+        m_hid->requestLedColor(value, value, value);
+    else if (m_transport == TransportSerial)
+        m_serial->requestLedColor(value, value, value);
+}
+
+void MainWindow::sendWriteCard(uint8_t sector, uint8_t block,
+                               QByteArray keyA, QByteArray keyB,
+                               QByteArray data)
+{
+    if (m_transport == TransportHid)
+        m_hid->requestWriteCard(sector, block, keyA, keyB, data);
+    else if (m_transport == TransportSerial)
+        m_serial->requestWriteCard(sector, block, keyA, keyB, data);
 }
 
 void MainWindow::onDeviceDisconnected()

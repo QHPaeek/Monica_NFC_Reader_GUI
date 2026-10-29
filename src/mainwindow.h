@@ -43,6 +43,7 @@
 #include "banapasscard.h"
 #include "portscan.h"
 #include "bootproto.h"
+#include "aimeserial.h"
 
 class MainWindow : public QMainWindow
 {
@@ -95,6 +96,11 @@ private slots:
     void onRebootFinished(bool ok, const QString &error);
     void onProbeFinished(bool ok, const QString &summary);
     void pollEnterResult();
+
+    /* 串口 AimeIO 通道 */
+    void onSerialConnected(const QString &desc);
+    void onSerialDisconnected();
+    void onSerialError(const QString &msg);
 
     /* DFU (老固件, dfu-util) */
     void onDfuFileBrowse();
@@ -169,6 +175,15 @@ private:
     QString selectedHidPath() const;
     bool    selectedIsHid() const;
 
+    /* 传输通道抽象: HID 与串口共用同一套 AimeIO 命令 */
+    enum Transport { TransportNone, TransportHid, TransportSerial };
+    void handleTransportConnected(const QString &desc, bool needFlashRead);
+    void sendFlashRead();
+    void sendFlashWrite(const FlashData &data);
+    void sendLed(uint8_t value);
+    void sendWriteCard(uint8_t sector, uint8_t block,
+                       QByteArray keyA, QByteArray keyB, QByteArray data);
+
     static QString idmToDecimal(const QByteArray &idm);
 
     /* 辅助 */
@@ -188,6 +203,9 @@ private:
 
     /* ---- 数据 ---- */
     HIDWorker  *m_hid;
+    AimeSerialWorker *m_serial;        /* 串口 AimeIO 通道 */
+    Transport   m_transport;           /* 当前走 HID 还是串口 */
+    bool        m_serialConnecting;    /* bootloader 探测失败后正在连 AimeIO */
     FlashData   m_flashData;
     bool        m_connected;
     bool        m_langEn;

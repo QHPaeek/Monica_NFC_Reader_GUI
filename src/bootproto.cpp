@@ -191,7 +191,8 @@ bool BootFlasher::writeFrame(QSerialPort &port, quint16 opcode, quint16 seq,
 
     if (port.write(frame) != frame.size())
         return false;
-    port.flush();
+    /* 注意: QSerialPort::flush() 是丢弃未发出的数据, 不能用;
+     * waitForBytesWritten 才是等数据真正发出去。 */
     port.waitForBytesWritten(1000);
     return true;
 }
@@ -366,7 +367,6 @@ void BootFlasher::sendAimeJumpToBoot(const QString &portName, int preferredBaud)
                          .arg(portName).arg(baud));
 
         const qint64 written = port.write(frame);
-        port.flush();
         port.waitForBytesWritten(500);
 
         QByteArray answer;

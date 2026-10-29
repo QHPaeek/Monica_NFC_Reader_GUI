@@ -10,7 +10,8 @@ SOURCES += \
     src/banapasscard.cpp \
     src/accesscode.cpp \
     src/portscan.cpp \
-    src/bootproto.cpp
+    src/bootproto.cpp \
+    src/aimeserial.cpp
 
 HEADERS += \
     src/mainwindow.h \
@@ -20,7 +21,8 @@ HEADERS += \
     src/accesscode.h \
     src/sbox.h \
     src/portscan.h \
-    src/bootproto.h
+    src/bootproto.h \
+    src/aimeserial.h
 
 RESOURCES += resources.qrc
 
