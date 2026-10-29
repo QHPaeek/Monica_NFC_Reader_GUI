@@ -36,6 +36,7 @@ enum AimeIOCmd : uint8_t {
     CMD_Write_Card     = 0x02,
     CMD_LED            = 0x60,
     CMD_JUMP2DFU       = 0x61,
+    CMD_JUMP2BOOT      = 0x62,
     CMD_Flash_Read     = 0x70,
     CMD_Flash_Write    = 0x71,
 };
@@ -98,6 +99,7 @@ public slots:
     void requestFlashWrite(const FlashData &data);
     void requestLedColor(uint8_t r, uint8_t g, uint8_t b);
     void requestJumpToDfu();
+    void requestJumpToBoot();
     void requestWriteCard(uint8_t sector, uint8_t block,
                           QByteArray keyA, QByteArray keyB,
                           QByteArray data);

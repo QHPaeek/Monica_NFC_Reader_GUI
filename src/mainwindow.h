@@ -1,8 +1,8 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
-#define APP_VERSION  "V1.0.4"
-#define APP_VERSION_NUM 0x00010004  // major.minor.patch
+#define APP_VERSION  "V1.0.5"
+#define APP_VERSION_NUM 0x00010005  // major.minor.patch
 
 /* 连接后读取 Flash 的超时时间 (ms) — 超时视为读卡器死机 */
 #define FLASH_READ_TIMEOUT_MS  3000
@@ -34,10 +34,15 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QProgressDialog>
+#include <QProgressBar>
+#include <QMessageBox>
+#include <QThread>
 
 #include "flashdata.h"
 #include "hidworker.h"
 #include "banapasscard.h"
+#include "portscan.h"
+#include "bootproto.h"
 
 class MainWindow : public QMainWindow
 {
@@ -76,8 +81,21 @@ private slots:
     void onRawDataSent(const QByteArray &data);
     void onRawDataReceived(const QByteArray &data);
 
-    /* DFU */
-    void onJumpToDfu();
+    /* 固件升级 (BOOTLOADER / DFU) */
+    void onFirmwareUpgradeClicked();
+    void onEnterBootloader();
+    void onEnterDfu();
+    void onBootFlash();
+    void onBootBrowse();
+    void onBootLog(const QString &line);
+    void onBootProgress(int percent, const QString &detail);
+    void onBootFlashFinished(bool ok, const QString &error);
+    void onRebootReader();
+    void onRebootFinished(bool ok, const QString &error);
+    void onProbeFinished(bool ok, const QString &summary);
+    void pollEnterResult();
+
+    /* DFU (老固件, dfu-util) */
     void onDfuFileBrowse();
     void onDfuFlash();
     void onDfuListFinished(int exitCode, QProcess::ExitStatus status);
@@ -107,7 +125,7 @@ private:
     QWidget* buildHeaderPanel();
     QWidget* buildCardMonitorPanel();
     QWidget* buildSettingsPanel();
-    QWidget* buildDfuPage();
+    QWidget* buildFirmwarePage();
     QWidget* buildWriteCardPage();
     QWidget* createSegaTab();
     QWidget* createSpiceTab();
@@ -128,10 +146,18 @@ private:
 
     /* 卡片显示 */
     void showCardInDisplay(const QString &uid, const QString &cardType,
-                           const QString &cardNumber);
+                           const QString &cardNumber,
+                           const QString &cardNumber2 = QString());
     void clearCardDisplay();
     void appendLogLine(const QString &prefix, const QString &hex,
                        const QString &color);
+
+    /* 固件升级辅助 */
+    void    updateFirmwareEntryState();
+    void    refreshPortCombo();
+    bool    bootloaderPort(ComPortInfo *out) const;
+    bool    dfuDevicePresent() const;
+    static QString idmToDecimal(const QByteArray &idm);
 
     /* 辅助 */
     void setControlsEnabled(bool enabled);
@@ -168,6 +194,7 @@ private:
     QFrame     *m_cardDisplayFrame;
     QLabel     *m_lblCardUid;
     QLabel     *m_lblCardNumber;
+    QLabel     *m_lblCardNumber2;   /* AIC 第二排: IDM 十进制 */
     QLabel     *m_lblCardType;
 
     /* ---- 原始数据日志 ---- */
@@ -216,15 +243,44 @@ private:
     QWidget        *m_dfuPage;
     QWidget        *m_writeCardPage;
 
-    /* DFU 页面 */
+    /* 固件升级页 — BOOTLOADER 区 */
+    QPushButton    *m_bootEnterBtn;
+    QComboBox      *m_bootPortCombo;
+    QPushButton    *m_bootPortRefreshBtn;
+    QLabel         *m_bootStateLabel;
+    QLineEdit      *m_bootFileEdit;
+    QPushButton    *m_bootBrowseBtn;
+    QPushButton    *m_bootFlashBtn;
+    QProgressBar   *m_bootProgress;
+    QString         m_bootFilePath;
+
+    /* 固件升级页 — DFU 区 */
     QLineEdit      *m_dfuFileEdit;
     QPushButton    *m_dfuBrowseBtn;
     QPushButton    *m_dfuFlashBtn;
+    QPushButton    *m_dfuEnterBtn;
+    QLabel         *m_dfuStateLabel;
     QPlainTextEdit *m_dfuLog;
     QProcess       *m_dfuProcess;
     QString         m_dfuFilePath;    // 固件文件路径 (.bin/.hex/.dfu)
     QString         m_dfuToolPath;    // dfu-util.exe 路径
     bool            m_inDfuMode;
+
+    /* 固件升级页 — 公共 */
+    QPushButton    *m_rebootBtn;
+    QTimer         *m_portTimer;      // 每秒刷新串口列表
+    QTimer         *m_enterTimer;     // 进入 BOOT/DFU 后等待枚举
+    QMessageBox    *m_enterDlg;       // 「正在尝试进入…」弹窗
+    int             m_enterMode;      // 0=无 1=BOOT 2=DFU
+    int             m_enterWaitedMs;  // 已等待毫秒
+    bool            m_enterNotified;  // 1 秒提示是否已给出
+    bool            m_suppressPortSignal;
+    QString         m_portSignature;  // 串口列表比对签名
+
+    /* BOOTLOADER 烧录线程 */
+    QThread        *m_bootThread;
+    BootFlasher    *m_bootFlasher;
+    bool            m_bootBusy;
 
     /* 网络下载 dfu-util */
     QNetworkAccessManager *m_netManager;

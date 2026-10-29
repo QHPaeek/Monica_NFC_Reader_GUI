@@ -1,5 +1,8 @@
 #include "mainwindow.h"
 
+#include <QtEndian>
+#include <algorithm>
+
 #include <QApplication>
 #include <QDateTime>
 #include <QHeaderView>
@@ -15,6 +18,36 @@
 
 /* AIC 解密 / 卡号转换 — 来自固件 accesscode.h */
 #include "accesscode.h"
+
+/* 粗查 0x6000 处是否像一颗合法 Cortex-M 向量表：
+ * 初值 SP 落在 SRAM (0x2000xxxx)，复位向量落在 Flash (0x0800xxxx)。
+ * 用来在烧录前识别"合并固件 / 纯 APP 镜像"选错的情况。
+ */
+static bool looksLikeMergedImage(const QString &path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return false;
+    if (f.size() < static_cast<qint64>(BOOT_IMAGE_HEADER_SIZE) + 8)
+        return false;
+
+    if (!f.seek(static_cast<qint64>(BOOT_IMAGE_HEADER_SIZE)))
+        return false;
+
+    const QByteArray v = f.read(8);
+    f.close();
+    if (v.size() < 8)
+        return false;
+
+    const quint32 sp = qFromLittleEndian<quint32>(
+        reinterpret_cast<const uchar *>(v.constData()));
+    const quint32 rv = qFromLittleEndian<quint32>(
+        reinterpret_cast<const uchar *>(v.constData()) + 4);
+
+    const bool spOk = (sp & 0x2FFE0000u) == 0x20000000u;
+    const bool rvOk = (rv & 0xFF000000u) == 0x08000000u;
+    return spOk && rvOk;
+}
 
 static QString formatCardNumber(const QString &hex)
 {
@@ -82,6 +115,27 @@ MainWindow::MainWindow(QWidget *parent)
     , m_advHint(nullptr)
     , m_btnWriteCardTab(nullptr)
     , m_lastCardType(Card_None)
+    , m_bootEnterBtn(nullptr)
+    , m_bootPortCombo(nullptr)
+    , m_bootPortRefreshBtn(nullptr)
+    , m_bootStateLabel(nullptr)
+    , m_bootFileEdit(nullptr)
+    , m_bootBrowseBtn(nullptr)
+    , m_bootFlashBtn(nullptr)
+    , m_bootProgress(nullptr)
+    , m_dfuEnterBtn(nullptr)
+    , m_dfuStateLabel(nullptr)
+    , m_rebootBtn(nullptr)
+    , m_portTimer(nullptr)
+    , m_enterTimer(nullptr)
+    , m_enterDlg(nullptr)
+    , m_enterMode(0)
+    , m_enterWaitedMs(0)
+    , m_enterNotified(false)
+    , m_suppressPortSignal(false)
+    , m_bootThread(nullptr)
+    , m_bootFlasher(nullptr)
+    , m_bootBusy(false)
 {
     memset(&m_flashData, 0, sizeof(FlashData));
 
@@ -111,10 +165,38 @@ MainWindow::MainWindow(QWidget *parent)
 
     setControlsEnabled(false);
     updateConnectionUI(false);
+
+    /* ---- BOOTLOADER 烧录线程 (串口 I/O 不能放在 GUI 线程) ---- */
+    m_bootThread  = new QThread(this);
+    m_bootFlasher = new BootFlasher();
+    m_bootFlasher->moveToThread(m_bootThread);
+
+    connect(m_bootThread, &QThread::finished,
+            m_bootFlasher, &QObject::deleteLater);
+    connect(m_bootFlasher, &BootFlasher::logLine,
+            this, &MainWindow::onBootLog);
+    connect(m_bootFlasher, &BootFlasher::progress,
+            this, &MainWindow::onBootProgress);
+    connect(m_bootFlasher, &BootFlasher::flashFinished,
+            this, &MainWindow::onBootFlashFinished);
+    connect(m_bootFlasher, &BootFlasher::bootAppFinished,
+            this, &MainWindow::onRebootFinished);
+    connect(m_bootFlasher, &BootFlasher::probeFinished,
+            this, &MainWindow::onProbeFinished);
+
+    m_bootThread->start();
 }
 
 MainWindow::~MainWindow()
 {
+    if (m_bootFlasher)
+        m_bootFlasher->requestAbort();
+
+    if (m_bootThread) {
+        m_bootThread->quit();
+        m_bootThread->wait(3000);
+    }
+
     m_hid->stop();
     delete m_hid;
     m_hid = nullptr;
@@ -150,7 +232,7 @@ void MainWindow::setupUI()
     splitter->addWidget(buildCardMonitorPanel());
     m_stackedRight = new QStackedWidget(central);
     m_stackedRight->addWidget(buildSettingsPanel());   // index 0
-    m_stackedRight->addWidget(buildDfuPage());          // index 1
+    m_stackedRight->addWidget(buildFirmwarePage());     // index 1
     m_stackedRight->addWidget(buildWriteCardPage());    // index 2
     m_stackedRight->setCurrentIndex(0);
     splitter->addWidget(m_stackedRight);
@@ -226,11 +308,11 @@ QWidget* MainWindow::buildHeaderPanel()
     connect(m_btnLang,       &QPushButton::clicked,
             this, &MainWindow::onToggleLanguage);
 
-    m_btnDfu = new QPushButton(QStringLiteral("DFU"));
+    m_btnDfu = new QPushButton(QString::fromUtf8("固件升级"));
     m_btnDfu->setObjectName(QStringLiteral("btnDfu"));
-    m_btnDfu->setToolTip(QString::fromUtf8("跳转到固件升级模式"));
+    m_btnDfu->setToolTip(QString::fromUtf8("固件升级 (BOOTLOADER / DFU)"));
     connect(m_btnDfu, &QPushButton::clicked,
-            this, &MainWindow::onJumpToDfu);
+            this, &MainWindow::onFirmwareUpgradeClicked);
 
     m_btnWriteCardTab = new QPushButton(QString::fromUtf8("写入Aime卡"));
     m_btnWriteCardTab->setObjectName(QStringLiteral("btnDfu"));
@@ -301,6 +383,13 @@ QWidget* MainWindow::buildCardMonitorPanel()
     m_lblCardNumber->setWordWrap(false);
     m_lblCardNumber->hide();
 
+    /* AIC 专用第二排: IDM 直接转十进制 */
+    m_lblCardNumber2 = new QLabel(this);
+    m_lblCardNumber2->setObjectName(QStringLiteral("cardNumberLabel2"));
+    m_lblCardNumber2->setAlignment(Qt::AlignCenter);
+    m_lblCardNumber2->setWordWrap(false);
+    m_lblCardNumber2->hide();
+
     m_lblCardType = new QLabel(this);
     m_lblCardType->setObjectName(QStringLiteral("cardTypeLabel"));
     m_lblCardType->setAlignment(Qt::AlignCenter);
@@ -308,6 +397,7 @@ QWidget* MainWindow::buildCardMonitorPanel()
 
     displayLayout->addWidget(uidTitle);
     displayLayout->addWidget(m_lblCardNumber);
+    displayLayout->addWidget(m_lblCardNumber2);
     displayLayout->addWidget(m_lblCardUid);
     displayLayout->addWidget(m_lblCardType);
 
@@ -382,87 +472,207 @@ QWidget* MainWindow::buildSettingsPanel()
     return panel;
 }
 
-/* ---- DFU 固件升级页面 ---- */
-QWidget* MainWindow::buildDfuPage()
+/* ---- 固件升级页面 (BOOTLOADER / DFU 双通道) ---- */
+QWidget* MainWindow::buildFirmwarePage()
 {
     QWidget *w = new QWidget(this);
     w->setObjectName(QStringLiteral("dfuPage"));
-    QVBoxLayout *vbox = new QVBoxLayout(w);
-    vbox->setContentsMargins(24, 24, 24, 24);
-    vbox->setSpacing(16);
 
-    QLabel *title = new QLabel(QString::fromUtf8("DFU 固件升级"));
+    QVBoxLayout *vbox = new QVBoxLayout(w);
+    vbox->setContentsMargins(20, 16, 20, 16);
+    vbox->setSpacing(10);
+
+    QLabel *title = new QLabel(QString::fromUtf8("固件升级"));
     title->setObjectName(QStringLiteral("sectionTitle"));
-    QLabel *desc  = new QLabel(QString::fromUtf8(
-        "读卡器已进入 DFU 模式。选择固件文件并烧录到 STM32F072。\n"
-        "支持格式: .bin / .hex / .dfu"));
+
+    QLabel *desc = new QLabel(QString::fromUtf8(
+        "固件 v0.8 及以上走自研 BOOTLOADER（USB CDC / UART）；v0.7 及以下走 ST DFU。\n"
+        "连接读卡器后打开本页会自动按版本选择通道；未连接时也可手动刷写救援。"));
     desc->setObjectName(QStringLiteral("tabDesc"));
     desc->setWordWrap(true);
 
-    // 文件选择行
-    QHBoxLayout *fileRow = new QHBoxLayout();
-    m_dfuFileEdit = new QLineEdit(w);
-    m_dfuFileEdit->setObjectName(QStringLiteral("dfuFileEdit"));
+    /* ================= BOOTLOADER 区 ================= */
+    QGroupBox *bootBox = new QGroupBox(
+        QString::fromUtf8("BOOTLOADER 升级  ·  固件 v0.8 及以上"), w);
+    QVBoxLayout *bootLay = new QVBoxLayout(bootBox);
+    bootLay->setSpacing(8);
+
+    QHBoxLayout *bootEnterRow = new QHBoxLayout();
+    bootEnterRow->setSpacing(8);
+
+    m_bootEnterBtn = new QPushButton(QString::fromUtf8("进入 BOOTLOADER"), bootBox);
+    m_bootEnterBtn->setObjectName(QStringLiteral("btnPrimary"));
+    connect(m_bootEnterBtn, &QPushButton::clicked,
+            this, &MainWindow::onEnterBootloader);
+
+    m_bootPortCombo = new QComboBox(bootBox);
+    m_bootPortCombo->setMinimumWidth(200);
+    m_bootPortCombo->setToolTip(QString::fromUtf8(
+        "BOOTLOADER 串口 (USB CDC 或 UART)。\n"
+        "检测到 VID AFF1 / PID 52B2 的设备会自动选中。"));
+
+    m_bootPortRefreshBtn = new QPushButton(QString::fromUtf8("刷新"), bootBox);
+    m_bootPortRefreshBtn->setObjectName(QStringLiteral("btnSecondary"));
+    m_bootPortRefreshBtn->setFixedWidth(56);
+    connect(m_bootPortRefreshBtn, &QPushButton::clicked,
+            this, &MainWindow::refreshPortCombo);
+
+    bootEnterRow->addWidget(m_bootEnterBtn);
+    bootEnterRow->addWidget(m_bootPortCombo, 1);
+    bootEnterRow->addWidget(m_bootPortRefreshBtn);
+
+    m_bootStateLabel = new QLabel(QString::fromUtf8("未检测到 BOOTLOADER"), bootBox);
+    m_bootStateLabel->setObjectName(QStringLiteral("tabDesc"));
+
+    QHBoxLayout *bootFileRow = new QHBoxLayout();
+    bootFileRow->setSpacing(8);
+
+    m_bootFileEdit = new QLineEdit(bootBox);
+    m_bootFileEdit->setReadOnly(true);
+    m_bootFileEdit->setPlaceholderText(QString::fromUtf8(
+        "选择合并固件 (.bin) — 自动跳过前 24 KiB BOOTLOADER 头"));
+
+    m_bootBrowseBtn = new QPushButton(QString::fromUtf8("浏览..."), bootBox);
+    m_bootBrowseBtn->setObjectName(QStringLiteral("btnSecondary"));
+    connect(m_bootBrowseBtn, &QPushButton::clicked,
+            this, &MainWindow::onBootBrowse);
+
+    bootFileRow->addWidget(m_bootFileEdit, 1);
+    bootFileRow->addWidget(m_bootBrowseBtn);
+
+    m_bootProgress = new QProgressBar(bootBox);
+    m_bootProgress->setRange(0, 100);
+    m_bootProgress->setValue(0);
+    m_bootProgress->setFormat(QString::fromUtf8("%p%  %v/100"));
+    m_bootProgress->hide();
+
+    m_bootFlashBtn = new QPushButton(QString::fromUtf8("开始升级"), bootBox);
+    m_bootFlashBtn->setObjectName(QStringLiteral("btnPrimary"));
+    m_bootFlashBtn->setEnabled(false);
+    connect(m_bootFlashBtn, &QPushButton::clicked,
+            this, &MainWindow::onBootFlash);
+
+    bootLay->addLayout(bootEnterRow);
+    bootLay->addWidget(m_bootStateLabel);
+    bootLay->addLayout(bootFileRow);
+    bootLay->addWidget(m_bootProgress);
+    bootLay->addWidget(m_bootFlashBtn);
+
+    /* ================= DFU 区 ================= */
+    QGroupBox *dfuBox = new QGroupBox(
+        QString::fromUtf8("DFU 升级  ·  固件 v0.7 及以下"), w);
+    QVBoxLayout *dfuLay = new QVBoxLayout(dfuBox);
+    dfuLay->setSpacing(8);
+
+    QHBoxLayout *dfuEnterRow = new QHBoxLayout();
+    dfuEnterRow->setSpacing(8);
+
+    m_dfuEnterBtn = new QPushButton(QString::fromUtf8("进入 DFU"), dfuBox);
+    m_dfuEnterBtn->setObjectName(QStringLiteral("btnPrimary"));
+    connect(m_dfuEnterBtn, &QPushButton::clicked,
+            this, &MainWindow::onEnterDfu);
+
+    dfuEnterRow->addWidget(m_dfuEnterBtn);
+    dfuEnterRow->addStretch();
+
+    m_dfuStateLabel = new QLabel(QString::fromUtf8("未检测到 DFU 设备"), dfuBox);
+    m_dfuStateLabel->setObjectName(QStringLiteral("tabDesc"));
+
+    QHBoxLayout *dfuFileRow = new QHBoxLayout();
+    dfuFileRow->setSpacing(8);
+
+    m_dfuFileEdit = new QLineEdit(dfuBox);
+    m_dfuFileEdit->setReadOnly(true);
     m_dfuFileEdit->setPlaceholderText(
         QString::fromUtf8("选择固件文件 (.bin/.hex/.dfu) ..."));
-    m_dfuFileEdit->setReadOnly(true);
 
-    m_dfuBrowseBtn = new QPushButton(QString::fromUtf8("浏览..."), w);
+    m_dfuBrowseBtn = new QPushButton(QString::fromUtf8("浏览..."), dfuBox);
     m_dfuBrowseBtn->setObjectName(QStringLiteral("btnSecondary"));
     connect(m_dfuBrowseBtn, &QPushButton::clicked,
             this, &MainWindow::onDfuFileBrowse);
 
-    fileRow->addWidget(m_dfuFileEdit, 1);
-    fileRow->addWidget(m_dfuBrowseBtn);
+    dfuFileRow->addWidget(m_dfuFileEdit, 1);
+    dfuFileRow->addWidget(m_dfuBrowseBtn);
 
-    // 目标信息
-    QLabel *targetLabel = new QLabel(
-        QStringLiteral("Target: STM32F072  @  0x08000000"), w);
-    targetLabel->setObjectName(QStringLiteral("tabDesc"));
-
-    // 工具检测 + 下载按钮
-    QHBoxLayout *toolRow = new QHBoxLayout();
-    m_dfuDownloadBtn = new QPushButton(QString::fromUtf8("未找到 dfu-util, 点击下载"), w);
+    m_dfuDownloadBtn = new QPushButton(
+        QString::fromUtf8("未找到 dfu-util, 点击下载"), dfuBox);
     m_dfuDownloadBtn->setObjectName(QStringLiteral("btnSecondary"));
     m_dfuDownloadBtn->setVisible(false);
     connect(m_dfuDownloadBtn, &QPushButton::clicked,
             this, &MainWindow::onDfuCheckTool);
 
-    // 烧录按钮
-    m_dfuFlashBtn = new QPushButton(QString::fromUtf8("烧录固件"), w);
+    m_dfuFlashBtn = new QPushButton(QString::fromUtf8("烧录固件"), dfuBox);
     m_dfuFlashBtn->setObjectName(QStringLiteral("btnPrimary"));
     m_dfuFlashBtn->setEnabled(false);
     connect(m_dfuFlashBtn, &QPushButton::clicked,
             this, &MainWindow::onDfuFlash);
 
-    // 日志输出
+    dfuLay->addLayout(dfuEnterRow);
+    dfuLay->addWidget(m_dfuStateLabel);
+    dfuLay->addLayout(dfuFileRow);
+    dfuLay->addWidget(m_dfuDownloadBtn);
+    dfuLay->addWidget(m_dfuFlashBtn);
+
+    /* ================= 共用日志 + 重启 ================= */
     m_dfuLog = new QPlainTextEdit(w);
     m_dfuLog->setObjectName(QStringLiteral("dfuLog"));
     m_dfuLog->setReadOnly(true);
-    m_dfuLog->setMaximumBlockCount(200);
+    m_dfuLog->setMaximumBlockCount(500);
     m_dfuLog->setStyleSheet(
         QStringLiteral("QPlainTextEdit { background:#1E1E2E; color:#CCCCCC; "
                        "font-family:Consolas,monospace; font-size:12px; }"));
 
-    // QProcess
+    m_rebootBtn = new QPushButton(QString::fromUtf8("重启读卡器"), w);
+    m_rebootBtn->setObjectName(QStringLiteral("btnSecondary"));
+    m_rebootBtn->setEnabled(false);
+    m_rebootBtn->setToolTip(QString::fromUtf8(
+        "通过 BOOTLOADER 的 BOOT_APP 命令跳回应用固件"));
+    connect(m_rebootBtn, &QPushButton::clicked,
+            this, &MainWindow::onRebootReader);
+
+    vbox->addWidget(title);
+    vbox->addWidget(desc);
+    vbox->addWidget(bootBox);
+    vbox->addWidget(dfuBox);
+    vbox->addWidget(m_dfuLog, 1);
+
+    QHBoxLayout *bottomRow = new QHBoxLayout();
+    bottomRow->addStretch();
+    bottomRow->addWidget(m_rebootBtn);
+    vbox->addLayout(bottomRow);
+
+    /* ---- QProcess / 网络 ---- */
     m_dfuProcess = new QProcess(this);
 
     connect(m_netManager, &QNetworkAccessManager::finished,
             this, &MainWindow::onDfuDownloadFinished);
 
-    connect(m_netManager, &QNetworkAccessManager::finished,
-            this, &MainWindow::onDfuDownloadFinished);
+    /* ---- 串口列表每秒刷新 ---- */
+    m_portTimer = new QTimer(this);
+    m_portTimer->setInterval(1000);
+    connect(m_portTimer, &QTimer::timeout,
+            this, &MainWindow::refreshPortCombo);
+    m_portTimer->start();
 
-    toolRow->addWidget(m_dfuDownloadBtn);
-    toolRow->addStretch();
+    /* ---- 手动切换串口后验证一次 ---- */
+    connect(m_bootPortCombo,
+            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) {
+        if (m_suppressPortSignal || m_bootBusy)
+            return;
+        const QString port = m_bootPortCombo->currentData().toString();
+        if (port.isEmpty())
+            return;
+        QMetaObject::invokeMethod(m_bootFlasher, "probe",
+                                  Qt::QueuedConnection,
+                                  Q_ARG(QString, port));
+    });
 
-    vbox->addWidget(title);
-    vbox->addWidget(desc);
-    vbox->addLayout(fileRow);
-    vbox->addWidget(targetLabel);
-    vbox->addLayout(toolRow);
-    vbox->addWidget(m_dfuFlashBtn);
-    vbox->addWidget(m_dfuLog, 1);
+    /* ---- 进入 BOOT/DFU 后的等待计时器 ---- */
+    m_enterTimer = new QTimer(this);
+    m_enterTimer->setInterval(250);
+    connect(m_enterTimer, &QTimer::timeout,
+            this, &MainWindow::pollEnterResult);
 
     return w;
 }
@@ -1199,8 +1409,24 @@ QString MainWindow::extractCardNumber(uint8_t cardType,
     return formatCardNumber(hex.toUpper());
 }
 
+/* IDM (8 字节大端) → 十进制字符串, 左补 0 到 20 位
+ * 仅用于 AIC 卡的第二排显示, 不代表真实卡号。
+ */
+QString MainWindow::idmToDecimal(const QByteArray &idm)
+{
+    if (idm.size() < 8)
+        return QString();
+
+    quint64 v = 0;
+    for (int i = 0; i < 8; ++i)
+        v = (v << 8) | static_cast<quint8>(idm.at(i));
+
+    return QString::number(v).rightJustified(20, QLatin1Char('0'));
+}
+
 void MainWindow::showCardInDisplay(const QString &uid, const QString &cardType,
-                                   const QString &cardNumber)
+                                   const QString &cardNumber,
+                                   const QString &cardNumber2)
 {
     // UID: 小字灰色
     m_lblCardUid->setText(uid);
@@ -1221,6 +1447,15 @@ void MainWindow::showCardInDisplay(const QString &uid, const QString &cardType,
     m_lblCardNumber->style()->polish(m_lblCardNumber);
     m_lblCardNumber->show();
 
+    // AIC 第二排: IDM 十六进制直接转十进制 (补零 20 位)
+    if (!cardNumber2.isEmpty()) {
+        m_lblCardNumber2->setText(cardNumber2);
+        m_lblCardNumber2->show();
+    } else {
+        m_lblCardNumber2->clear();
+        m_lblCardNumber2->hide();
+    }
+
     m_lblCardType->setText(cardType);
     m_lblCardType->show();
 }
@@ -1235,6 +1470,8 @@ void MainWindow::clearCardDisplay()
     m_lblCardUid->style()->polish(m_lblCardUid);
 
     m_lblCardNumber->hide();
+    m_lblCardNumber2->clear();
+    m_lblCardNumber2->hide();
     m_lblCardType->hide();
 }
 
@@ -1362,36 +1599,571 @@ void MainWindow::appendLogLine(const QString &prefix, const QString &hex,
  *  DFU 相关槽
  * ==================================================================== */
 
-void MainWindow::onJumpToDfu()
+/* ====================================================================
+ *  固件升级 — 页面入口与通道切换
+ * ==================================================================== */
+
+void MainWindow::onFirmwareUpgradeClicked()
 {
-    // 未连接时直接切换到 DFU 页面 (供刷死设备的用户使用)
-    if (!m_connected) {
-        m_stackedRight->setCurrentIndex(1);
-        m_btnDfu->hide();
-        m_btnConnect->setEnabled(true);
-        m_lblStatusMsg->setText(trC(
-            QString::fromUtf8("已进入 DFU 模式（离线）。请选择固件文件烧录。"),
-            QStringLiteral("DFU mode (offline). Select firmware to flash.")));
-        onDfuCheckTool();
+    /* 再点一次回到设置页 (当作开关用, 否则进入后没有返回入口) */
+    if (m_stackedRight->currentIndex() == 1) {
+        m_stackedRight->setCurrentIndex(0);
         return;
     }
 
-    auto result = QMessageBox::question(this,
-        trC(QString::fromUtf8("跳转 DFU"),
-            QStringLiteral("Jump to DFU")),
-        trC(QString::fromUtf8(
-            "读卡器将断开连接并进入 DFU 固件升级模式。\n确定继续？"),
-            QStringLiteral(
-            "The reader will disconnect and enter DFU mode.\nContinue?")),
-        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    m_stackedRight->setCurrentIndex(1);
+    refreshPortCombo();
 
-    if (result != QMessageBox::Yes) return;
+    /* 检测 dfu-util: 内置资源会自动释放到临时目录, 失败才弹下载框 */
+    if (m_dfuToolPath.isEmpty())
+        onDfuCheckTool();
+
+    const bool bootHere = bootloaderPort(nullptr);
+    const bool dfuHere  = dfuDevicePresent();
+
+    updateFirmwareEntryState();
+
+    /* 已经在某个升级通道里 → 不再重复动作 */
+    if (bootHere || dfuHere)
+        return;
+
+    /* 没连接读卡器 → 什么都不干, 保留手动/救砖能力 */
+    if (!m_connected) {
+        m_lblStatusMsg->setText(trC(
+            QString::fromUtf8("未连接读卡器 — 可手动选择串口，或将设备置于 DFU 后直接烧录"),
+            QStringLiteral("Reader not connected — pick a port manually or flash in DFU")));
+        return;
+    }
+
+    if (m_fwVersion == 0) {
+        m_lblStatusMsg->setText(trC(
+            QString::fromUtf8("尚未读取到固件版本，请稍候再试，或手动点「进入 BOOTLOADER」"),
+            QStringLiteral("Firmware version not read yet — retry shortly")));
+        return;
+    }
+
+    /* v0.8 及以上带自研 BOOTLOADER; v0.7 及以下走 ST DFU */
+    if (m_fwVersion >= 0x08)
+        onEnterBootloader();
+    else
+        onEnterDfu();
+}
+
+void MainWindow::onEnterBootloader()
+{
+    if (m_bootBusy)
+        return;
+
+    if (bootloaderPort(nullptr)) {
+        QMessageBox::information(this,
+            trC(QString::fromUtf8("已在 BOOTLOADER"),
+                QStringLiteral("Already in Bootloader")),
+            trC(QString::fromUtf8(
+                    "读卡器已经处于 BOOTLOADER 模式，可以直接选择固件升级。"),
+                QStringLiteral(
+                    "The reader is already in the bootloader. Select a firmware file to upgrade.")));
+        return;
+    }
+
+    if (!m_connected) {
+        QMessageBox::warning(this,
+            trC(QString::fromUtf8("未连接"),
+                QStringLiteral("Not Connected")),
+            trC(QString::fromUtf8(
+                    "读卡器未连接，无法发送进入 BOOTLOADER 的命令。\n\n"
+                    "如果设备已刷死，可手动选择串口后直接点「开始升级」。"),
+                QStringLiteral(
+                    "The reader is not connected, so the jump command cannot be sent.\n\n"
+                    "If the device is bricked, pick a port manually and click Start.")));
+        return;
+    }
+
+    /* v0.7 及以下没有 0x62 命令, 提前告知, 别让用户白等 10 秒 */
+    if (m_fwVersion != 0 && m_fwVersion < 0x08) {
+        auto r = QMessageBox::question(this,
+            trC(QString::fromUtf8("固件不支持"),
+                QStringLiteral("Firmware Not Supported")),
+            trC(QString::fromUtf8(
+                    "当前固件为 v%1.%2，低于 v0.8，不含自研 BOOTLOADER。\n\n"
+                    "是否改用 DFU 方式升级？")
+                .arg(m_fwVersion >> 4).arg(m_fwVersion & 0x0F),
+                QStringLiteral(
+                    "The current firmware is v%1.%2, older than v0.8 and has no bootloader.\n\n"
+                    "Switch to DFU instead?")
+                .arg(m_fwVersion >> 4).arg(m_fwVersion & 0x0F)),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+        if (r == QMessageBox::Yes) {
+            onEnterDfu();
+            return;
+        }
+    }
+
+    /* 弹窗: 正在尝试进入 */
+    m_enterMode       = 1;
+    m_enterWaitedMs   = 0;
+    m_enterNotified   = false;
+
+    if (m_enterDlg) {
+        m_enterDlg->close();
+        m_enterDlg->deleteLater();
+    }
+    m_enterDlg = new QMessageBox(QMessageBox::Information,
+        trC(QString::fromUtf8("固件升级"), QStringLiteral("Firmware Upgrade")),
+        trC(QString::fromUtf8("正在尝试进入 BOOTLOADER…"),
+            QStringLiteral("Trying to enter the bootloader…")),
+        QMessageBox::NoButton, this);
+    m_enterDlg->setWindowModality(Qt::WindowModal);
+    m_enterDlg->show();
+
+    m_enterTimer->start();
+
+    m_lblStatusMsg->setText(trC(
+        QString::fromUtf8("正在尝试进入 BOOTLOADER…"),
+        QStringLiteral("Trying to enter the bootloader...")));
+
+    m_hid->requestJumpToBoot();
+}
+
+void MainWindow::onEnterDfu()
+{
+    if (m_bootBusy)
+        return;
+
+    if (dfuDevicePresent()) {
+        QMessageBox::information(this,
+            trC(QString::fromUtf8("已在 DFU"),
+                QStringLiteral("Already in DFU")),
+            trC(QString::fromUtf8("已检测到处于 DFU 模式的设备。"),
+                QStringLiteral("A device in DFU mode was detected.")));
+        return;
+    }
+
+    if (!m_connected) {
+        QMessageBox::warning(this,
+            trC(QString::fromUtf8("未连接"),
+                QStringLiteral("Not Connected")),
+            trC(QString::fromUtf8(
+                    "读卡器未连接，无法发送进入 DFU 的命令。\n\n"
+                    "请手动让设备进入 DFU（例如按住 BOOT 键上电），"
+                    "检测到 DFU 设备后即可直接烧录。"),
+                QStringLiteral(
+                    "The reader is not connected, so the DFU jump command cannot be sent.\n\n"
+                    "Put the device into DFU manually; once detected you can flash it.")));
+        return;
+    }
+
+    m_enterMode     = 2;
+    m_enterWaitedMs = 0;
+    m_enterNotified = false;
+
+    if (m_enterDlg) {
+        m_enterDlg->close();
+        m_enterDlg->deleteLater();
+    }
+    m_enterDlg = new QMessageBox(QMessageBox::Information,
+        trC(QString::fromUtf8("固件升级"), QStringLiteral("Firmware Upgrade")),
+        trC(QString::fromUtf8("正在尝试进入 DFU 模式…"),
+            QStringLiteral("Trying to enter DFU mode…")),
+        QMessageBox::NoButton, this);
+    m_enterDlg->setWindowModality(Qt::WindowModal);
+    m_enterDlg->show();
+
+    m_enterTimer->start();
+
+    m_lblStatusMsg->setText(trC(
+        QString::fromUtf8("正在尝试进入 DFU 模式…"),
+        QStringLiteral("Trying to enter DFU mode...")));
 
     m_inDfuMode = true;
-    m_lblStatusMsg->setText(trC(
-        QString::fromUtf8("正在请求跳转 DFU..."),
-        QStringLiteral("Requesting DFU jump...")));
     m_hid->requestJumpToDfu();
+}
+
+/* 每 250 ms 检查一次是否已进入目标模式 */
+void MainWindow::pollEnterResult()
+{
+    if (m_enterMode == 0) {
+        m_enterTimer->stop();
+        return;
+    }
+
+    m_enterWaitedMs += m_enterTimer->interval();
+
+    const bool ok = (m_enterMode == 1) ? bootloaderPort(nullptr)
+                                       : dfuDevicePresent();
+
+    if (ok) {
+        m_enterTimer->stop();
+        refreshPortCombo();
+        updateFirmwareEntryState();
+
+        if (m_enterDlg) {
+            m_enterDlg->setIcon(QMessageBox::Information);
+            m_enterDlg->setText(m_enterMode == 1
+                ? trC(QString::fromUtf8(
+                          "已成功进入 BOOTLOADER。\n现在可以选择固件文件并开始升级。"),
+                      QStringLiteral(
+                          "Entered the bootloader successfully.\nSelect a firmware file to upgrade."))
+                : trC(QString::fromUtf8(
+                          "已成功进入 DFU 模式。\n现在可以选择固件文件并烧录。"),
+                      QStringLiteral(
+                          "Entered DFU mode successfully.\nSelect a firmware file to flash.")));
+            m_enterDlg->setStandardButtons(QMessageBox::Ok);
+        }
+
+        m_lblStatusMsg->setText(m_enterMode == 1
+            ? trC(QString::fromUtf8("已进入 BOOTLOADER，可以开始升级"),
+                  QStringLiteral("In bootloader — ready to upgrade"))
+            : trC(QString::fromUtf8("已进入 DFU，可以开始烧录"),
+                  QStringLiteral("In DFU — ready to flash")));
+
+        m_enterMode = 0;
+        return;
+    }
+
+    /* 满 1 秒仍没看到 → 先告知一次, 然后继续等 (最多 10 秒) */
+    if (m_enterWaitedMs >= 1000 && !m_enterNotified) {
+        m_enterNotified = true;
+        if (m_enterDlg) {
+            m_enterDlg->setIcon(QMessageBox::Warning);
+            m_enterDlg->setText(m_enterMode == 1
+                ? trC(QString::fromUtf8(
+                          "1 秒内尚未检测到 BOOTLOADER 串口。\n"
+                          "设备可能仍在切换，继续等待中（最多 10 秒）…"),
+                      QStringLiteral(
+                          "No bootloader port yet after 1 s.\n"
+                          "The device may still be switching — waiting up to 10 s..."))
+                : trC(QString::fromUtf8(
+                          "1 秒内尚未检测到 DFU 设备。\n"
+                          "设备可能仍在重新枚举，继续等待中（最多 10 秒）…"),
+                      QStringLiteral(
+                          "No DFU device yet after 1 s.\n"
+                          "The device may still be re-enumerating — waiting up to 10 s...")));
+        }
+    }
+
+    if (m_enterWaitedMs >= 10000) {
+        m_enterTimer->stop();
+        if (m_enterDlg) {
+            m_enterDlg->setIcon(QMessageBox::Critical);
+            m_enterDlg->setText(m_enterMode == 1
+                ? trC(QString::fromUtf8(
+                          "进入 BOOTLOADER 失败。\n\n"
+                          "可能原因：固件尚未包含自研 BOOTLOADER、USB 线不支持数据、"
+                          "或设备已死机。\n可尝试拔插 USB 后重试。"),
+                      QStringLiteral(
+                          "Failed to enter the bootloader.\n\n"
+                          "The firmware may lack the bootloader, the cable may be charge-only, "
+                          "or the device may have hung.\nTry re-plugging the USB cable."))
+                : trC(QString::fromUtf8(
+                          "进入 DFU 失败。\n\n"
+                          "请尝试手动进入 DFU：断电后按住 BOOT 键再上电。"),
+                      QStringLiteral(
+                          "Failed to enter DFU.\n\n"
+                          "Try entering DFU manually: hold BOOT while powering on.")));
+            m_enterDlg->setStandardButtons(QMessageBox::Ok);
+        }
+
+        m_lblStatusMsg->setText(trC(
+            QString::fromUtf8("进入升级模式失败"),
+            QStringLiteral("Failed to enter upgrade mode")));
+
+        m_enterMode = 0;
+    }
+}
+
+/* ---- 串口下拉框实时刷新 ---- */
+
+void MainWindow::refreshPortCombo()
+{
+    if (!m_bootPortCombo)
+        return;
+
+    const auto ports = PortScan::listComPorts();
+
+    /* 列表没变化就不重建, 避免打断用户展开的下拉框 */
+    QString signature;
+    for (const ComPortInfo &p : ports)
+        signature += p.portName + QLatin1Char('|') + p.description
+                   + QLatin1Char('|') + QString::number(p.vid) + QLatin1Char(':')
+                   + QString::number(p.pid) + QLatin1Char(';');
+
+    const bool bootHere = bootloaderPort(nullptr);
+    signature += bootHere ? QStringLiteral("#boot") : QStringLiteral("#noboot");
+    signature += dfuDevicePresent() ? QStringLiteral("#dfu") : QStringLiteral("#nodfu");
+
+    if (signature == m_portSignature) {
+        updateFirmwareEntryState();
+        return;
+    }
+    m_portSignature = signature;
+
+    const QString prev = m_bootPortCombo->currentData().toString();
+
+    m_suppressPortSignal = true;
+    m_bootPortCombo->clear();
+
+    int autoIdx = -1;
+    for (const ComPortInfo &p : ports) {
+        m_bootPortCombo->addItem(p.displayName(), p.portName);
+        if (p.isBootloader() && autoIdx < 0)
+            autoIdx = m_bootPortCombo->count() - 1;
+    }
+
+    if (ports.isEmpty()) {
+        m_bootPortCombo->addItem(
+            trC(QString::fromUtf8("(无可用串口)"),
+                QStringLiteral("(no serial ports)")),
+            QString());
+    } else if (autoIdx >= 0) {
+        m_bootPortCombo->setCurrentIndex(autoIdx);
+    } else if (!prev.isEmpty()) {
+        const int idx = m_bootPortCombo->findData(prev);
+        if (idx >= 0)
+            m_bootPortCombo->setCurrentIndex(idx);
+    }
+
+    m_suppressPortSignal = false;
+
+    updateFirmwareEntryState();
+}
+
+void MainWindow::updateFirmwareEntryState()
+{
+    if (!m_bootEnterBtn || !m_dfuEnterBtn)
+        return;
+
+    ComPortInfo boot;
+    const bool bootHere = bootloaderPort(&boot);
+    const bool dfuHere  = dfuDevicePresent();
+    const bool anyMode  = bootHere || dfuHere;
+
+    /* 任一通道已连接 → 两个「进入」按钮都置灰 */
+    m_bootEnterBtn->setEnabled(!anyMode && !m_bootBusy);
+    m_dfuEnterBtn->setEnabled(!anyMode && !m_bootBusy);
+
+    if (bootHere) {
+        m_bootStateLabel->setText(trC(
+            QString::fromUtf8("● 已连接 BOOTLOADER — %1").arg(boot.displayName()),
+            QStringLiteral("● Bootloader connected — %1").arg(boot.displayName())));
+    } else {
+        m_bootStateLabel->setText(trC(
+            QString::fromUtf8("○ 未检测到 BOOTLOADER"),
+            QStringLiteral("○ No bootloader detected")));
+    }
+
+    m_dfuStateLabel->setText(dfuHere
+        ? trC(QString::fromUtf8("● 已检测到 DFU 设备"),
+              QStringLiteral("● DFU device detected"))
+        : trC(QString::fromUtf8("○ 未检测到 DFU 设备"),
+              QStringLiteral("○ No DFU device detected")));
+
+    m_bootFlashBtn->setEnabled(!m_bootBusy && !m_bootFilePath.isEmpty());
+    m_rebootBtn->setEnabled(bootHere && !m_bootBusy);
+}
+
+bool MainWindow::bootloaderPort(ComPortInfo *out) const
+{
+    return PortScan::findBootloaderPort(out);
+}
+
+bool MainWindow::dfuDevicePresent() const
+{
+    /* 读卡器的 DFU 描述符: VID AFF1 / PID DF11;
+     * 也兼容 ST 官方驱动的 0483:DF11 */
+    return PortScan::isUsbPresent(BOOT_USB_VID, BOOT_USB_PID_DFU)
+        || PortScan::isUsbPresent(0x0483, 0xDF11);
+}
+
+/* ---- BOOTLOADER 烧录 ---- */
+
+void MainWindow::onBootBrowse()
+{
+    QString path = QFileDialog::getOpenFileName(this,
+        trC(QString::fromUtf8("选择固件文件"),
+            QStringLiteral("Select Firmware File")),
+        QString(),
+        QStringLiteral("Firmware (*.bin);;All Files (*)"));
+    if (path.isEmpty())
+        return;
+
+    m_bootFilePath = path;
+    m_bootFileEdit->setText(path);
+    updateFirmwareEntryState();
+}
+
+void MainWindow::onBootFlash()
+{
+    if (m_bootBusy || m_bootFilePath.isEmpty())
+        return;
+
+    const QString port = m_bootPortCombo->currentData().toString();
+    if (port.isEmpty()) {
+        QMessageBox::warning(this,
+            trC(QString::fromUtf8("未选择串口"), QStringLiteral("No Port")),
+            trC(QString::fromUtf8("请先在下拉框中选择 BOOTLOADER 的串口。"),
+                QStringLiteral("Select the bootloader serial port first.")));
+        return;
+    }
+
+    if (!bootloaderPort(nullptr)) {
+        auto r = QMessageBox::question(this,
+            trC(QString::fromUtf8("确认烧录"), QStringLiteral("Confirm Flash")),
+            trC(QString::fromUtf8(
+                    "当前没有检测到 BOOTLOADER 设备。\n\n"
+                    "仍要在 %1 上尝试烧录吗？").arg(port),
+                QStringLiteral(
+                    "No bootloader detected.\n\n"
+                    "Try flashing on %1 anyway?").arg(port)),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (r != QMessageBox::Yes)
+            return;
+    }
+
+    /* 安全检查: 0x6000 处应是一颗合法向量表 (合并固件) */
+    if (!looksLikeMergedImage(m_bootFilePath)) {
+        auto r = QMessageBox::warning(this,
+            trC(QString::fromUtf8("固件格式可疑"),
+                QStringLiteral("Suspicious Firmware")),
+            trC(QString::fromUtf8(
+                    "文件在偏移 0x6000 处不像合法的 APP 向量表。\n\n"
+                    "这通常意味着它不是「BOOTLOADER + APP」的合并固件，"
+                    "而是纯 APP 镜像。继续烧录会跳过前 24 KiB，"
+                    "可能导致设备无法启动。\n\n仍要继续吗？"),
+                QStringLiteral(
+                    "The data at offset 0x6000 does not look like a valid application "
+                    "vector table.\n\nThis usually means the file is a plain application "
+                    "image, not a merged bootloader+app image. Continuing would skip the "
+                    "first 24 KiB and may brick the device.\n\nContinue anyway?")),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (r != QMessageBox::Yes)
+            return;
+    }
+
+    m_bootBusy = true;
+    m_bootProgress->setValue(0);
+    m_bootProgress->show();
+    m_dfuLog->clear();
+    updateFirmwareEntryState();
+
+    QMetaObject::invokeMethod(m_bootFlasher, "flash", Qt::QueuedConnection,
+                              Q_ARG(QString, port),
+                              Q_ARG(QString, m_bootFilePath),
+                              Q_ARG(bool, true));
+}
+
+void MainWindow::onBootLog(const QString &line)
+{
+    if (m_dfuLog)
+        m_dfuLog->appendPlainText(line);
+}
+
+void MainWindow::onBootProgress(int percent, const QString &detail)
+{
+    if (!m_bootProgress)
+        return;
+    m_bootProgress->setValue(qBound(0, percent, 100));
+    m_bootProgress->setFormat(QStringLiteral("%1%  %2").arg(percent).arg(detail));
+}
+
+void MainWindow::onBootFlashFinished(bool ok, const QString &error)
+{
+    m_bootBusy = false;
+
+    if (ok) {
+        m_bootProgress->setValue(100);
+        m_bootProgress->setFormat(QString::fromUtf8("100%  烧录完成"));
+        refreshPortCombo();
+
+        QMessageBox::information(this,
+            trC(QString::fromUtf8("升级完成"), QStringLiteral("Upgrade Complete")),
+            trC(QString::fromUtf8(
+                    "固件烧录完成并已校验通过。\n\n"
+                    "设备仍停留在 BOOTLOADER，请点「重启读卡器」启动新固件。"),
+                QStringLiteral(
+                    "Firmware flashed and verified.\n\n"
+                    "The device is still in the bootloader — click Restart Reader to boot the new firmware.")));
+    } else {
+        m_bootProgress->hide();
+        updateFirmwareEntryState();
+
+        QMessageBox::critical(this,
+            trC(QString::fromUtf8("升级失败"), QStringLiteral("Upgrade Failed")),
+            trC(QString::fromUtf8("固件升级失败：\n\n%1").arg(error),
+                QStringLiteral("Firmware upgrade failed:\n\n%1").arg(error)));
+        return;
+    }
+
+    updateFirmwareEntryState();
+}
+
+/* ---- 重启读卡器 ---- */
+
+void MainWindow::onRebootReader()
+{
+    if (m_bootBusy)
+        return;
+
+    const QString port = m_bootPortCombo->currentData().toString();
+    if (port.isEmpty()) {
+        QMessageBox::warning(this,
+            trC(QString::fromUtf8("未选择串口"), QStringLiteral("No Port")),
+            trC(QString::fromUtf8("请先选择 BOOTLOADER 的串口。"),
+                QStringLiteral("Select the bootloader serial port first.")));
+        return;
+    }
+
+    m_bootBusy = true;
+    updateFirmwareEntryState();
+    m_dfuLog->appendPlainText(trC(
+        QString::fromUtf8("正在发送 BOOT_APP，重启读卡器…"),
+        QStringLiteral("Sending BOOT_APP, restarting the reader...")));
+
+    QMetaObject::invokeMethod(m_bootFlasher, "bootApp", Qt::QueuedConnection,
+                              Q_ARG(QString, port));
+}
+
+void MainWindow::onRebootFinished(bool ok, const QString &error)
+{
+    m_bootBusy = false;
+    refreshPortCombo();
+    updateFirmwareEntryState();
+
+    if (ok) {
+        m_dfuLog->appendPlainText(trC(
+            QString::fromUtf8("已重启，设备应重新枚举为读卡器。"),
+            QStringLiteral("Restarted — the device should re-enumerate as a reader.")));
+        m_lblStatusMsg->setText(trC(
+            QString::fromUtf8("读卡器已重启，请点「连接」重新连接"),
+            QStringLiteral("Reader restarted — click Connect to reconnect")));
+
+        QMessageBox::information(this,
+            trC(QString::fromUtf8("重启完成"), QStringLiteral("Restart Sent")),
+            trC(QString::fromUtf8(
+                    "已发送重启命令。\n\n"
+                    "设备会重新枚举为读卡器，请点右上角「连接」重新连接。"),
+                QStringLiteral(
+                    "Restart command sent.\n\n"
+                    "The device will re-enumerate as a reader. Click Connect to reconnect.")));
+    } else {
+        QMessageBox::critical(this,
+            trC(QString::fromUtf8("重启失败"), QStringLiteral("Restart Failed")),
+            trC(QString::fromUtf8("无法重启读卡器：\n\n%1").arg(error),
+                QStringLiteral("Failed to restart the reader:\n\n%1").arg(error)));
+    }
+}
+
+/* ---- 手动选择串口后的探测结果 ---- */
+
+void MainWindow::onProbeFinished(bool ok, const QString &summary)
+{
+    if (!m_dfuLog)
+        return;
+
+    m_dfuLog->appendPlainText(ok
+        ? trC(QString::fromUtf8("[探测] 串口确认是 BOOTLOADER — %1").arg(summary),
+              QStringLiteral("[probe] bootloader confirmed — %1").arg(summary))
+        : trC(QString::fromUtf8("[探测] 该串口不是 BOOTLOADER — %1").arg(summary),
+              QStringLiteral("[probe] not a bootloader — %1").arg(summary)));
 }
 
 void MainWindow::onDfuFileBrowse()
@@ -1411,6 +2183,12 @@ void MainWindow::onDfuFileBrowse()
 void MainWindow::onDfuFlash()
 {
     if (m_dfuFilePath.isEmpty()) return;
+
+    if (m_dfuToolPath.isEmpty()) {
+        onDfuCheckTool();
+        if (m_dfuToolPath.isEmpty())
+            return;
+    }
 
     m_dfuFlashBtn->setEnabled(false);
     m_dfuLog->clear();
@@ -1708,6 +2486,8 @@ void MainWindow::applyLanguage()
                             QStringLiteral("Write to Device")));
     m_btnReset->setText(trC(QStringLiteral("恢复默认"),
                             QStringLiteral("Reset Defaults")));
+    m_btnDfu->setText(trC(QString::fromUtf8("固件升级"),
+                          QStringLiteral("Firmware")));
 
     // 状态
     updateConnectionUI(m_connected);
@@ -1832,7 +2612,6 @@ void MainWindow::onDeviceDisconnected()
         m_inDfuMode = false;
         setControlsEnabled(false);
         m_stackedRight->setCurrentIndex(1);
-        m_btnDfu->hide();
         m_lblStatusMsg->setText(trC(
             QString::fromUtf8("设备已进入 DFU 模式，请选择固件文件烧录。"),
             QStringLiteral("Device entered DFU mode. Select firmware to flash.")));
@@ -1880,7 +2659,12 @@ void MainWindow::onCardDetected(uint8_t cardType, const QByteArray &rawData)
     QString typeName   = cardTypeName(cardType);
     QString cardNumber = extractCardNumber(cardType, rawData);
 
-    showCardInDisplay(uid, typeName, cardNumber);
+    /* AIC 卡额外显示一行: IDM 直接转十进制 */
+    QString cardNumber2;
+    if (cardType == Card_AIC && rawData.size() >= 8)
+        cardNumber2 = idmToDecimal(rawData.left(8));
+
+    showCardInDisplay(uid, typeName, cardNumber, cardNumber2);
     m_lblStatusMsg->setText(
         QStringLiteral("Card: %1  |  %2  |  %3 bytes")
             .arg(uid, typeName).arg(rawData.size()));
@@ -2396,6 +3180,10 @@ void MainWindow::applyStyleSheet()
         }
         QLabel#cardNumberLabel[placeholder="true"] {
             color: #4A4A6A; font-weight: 400;
+        }
+        QLabel#cardNumberLabel2 {
+            color: #82B1FF; font-family: "Cascadia Code", "Consolas", monospace;
+            font-size: 14px; font-weight: 500; letter-spacing: 1px; padding: 0 0 2px;
         }
         QLabel#cardTypeLabel { color: #82B1FF; font-size: 12px; font-weight: 600; }
 

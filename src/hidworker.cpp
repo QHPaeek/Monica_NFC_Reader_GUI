@@ -198,6 +198,16 @@ void HIDWorker::requestJumpToDfu()
     writeReport(report);
 }
 
+/* 跳转到自研 BOOTLOADER (0x62) — 固件收到后回包随即跳转,
+ * 设备会重新枚举为 CDC 串口 (VID AFF1 / PID 52B2)。
+ */
+void HIDWorker::requestJumpToBoot()
+{
+    uint8_t payload = 0;
+    QByteArray report = buildOutputReport(CMD_JUMP2BOOT, &payload, 0);
+    writeReport(report);
+}
+
 void HIDWorker::requestWriteCard(uint8_t sector, uint8_t block,
                                   QByteArray keyA, QByteArray keyB,
                                   QByteArray data)

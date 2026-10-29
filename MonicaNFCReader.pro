@@ -1,4 +1,4 @@
-QT       += core gui widgets network
+QT       += core gui widgets network serialport
 CONFIG   += static release
 TEMPLATE  = app
 TARGET    = Monica_NFC_Reader_GUI
@@ -8,7 +8,9 @@ SOURCES += \
     src/mainwindow.cpp \
     src/hidworker.cpp \
     src/banapasscard.cpp \
-    src/accesscode.cpp
+    src/accesscode.cpp \
+    src/portscan.cpp \
+    src/bootproto.cpp
 
 HEADERS += \
     src/mainwindow.h \
@@ -16,7 +18,9 @@ HEADERS += \
     src/flashdata.h \
     src/banapasscard.h \
     src/accesscode.h \
-    src/sbox.h
+    src/sbox.h \
+    src/portscan.h \
+    src/bootproto.h
 
 RESOURCES += resources.qrc
 

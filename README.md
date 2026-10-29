@@ -15,7 +15,8 @@
 | **读卡器配置 (SEGA/SPICE/NAMCO)** | 可视化设置读卡器 Flash 参数：启用的卡片类型、UART 波特率、LED 亮度等                                                        |
 | **固件版本校验**                   | 固件低于 v0.5 自动禁用写卡功能，防止误操作                                                                          |
 | **LED 灯控制**                  | 实时调节读卡器 RGB 灯光颜色                                                                                  |
-| **DFU 固件更新**                 | 一键触发读卡器进入 DFU 模式，支持 dfu-util 刷写固件                                                                 |
+| **固件升级 (双通道)**              | v0.8+ 走自研 BOOTLOADER（USB CDC / UART，内置协议实现，无需 Python）；v0.7 及以下走 ST DFU (dfu-util)。按版本自动选通道，串口列表实时刷新并自动识别 BOOTLOADER                |
+| **AIC 双排卡号**                 | AIC 卡同时显示解密得到的正确卡号，以及 IDM 直接转十进制（补零 20 位）的对照值                                                   |
 | **读取超时保护**                   | 连接后读取 Flash 若超时（默认 3 s）无响应，判定读卡器死机并弹窗提示，连接状态自动复位                                                  |
 
 ### 支持的卡片类型
@@ -145,7 +146,8 @@ typedef union {
 | 0x01 | Find_Card   | ↑   | 读卡器主动上报卡片检测   |
 | 0x02 | Write_Card  | ↓↑  | 写入 MIFARE 卡数据 |
 | 0x60 | LED         | ↓   | 设置读卡器 RGB 灯光  |
-| 0x61 | JUMP2DFU    | ↓↑  | 跳转 DFU 固件下载模式 |
+| 0x61 | JUMP2DFU    | ↓↑  | 跳转 ST DFU 固件下载模式 |
+| 0x62 | JUMP2BOOT   | ↓↑  | 跳转自研 BOOTLOADER (CDC/UART) |
 | 0x70 | Flash_Read  | ↓↑  | 读取读卡器配置       |
 | 0x71 | Flash_Write | ↓↑  | 写入读卡器配置       |
 

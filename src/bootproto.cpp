@@ -1,0 +1,577 @@
+#include "bootproto.h"
+
+#include <QtSerialPort/QSerialPort>
+#include <QtEndian>
+#include <QFile>
+#include <QFileInfo>
+#include <QElapsedTimer>
+#include <QThread>
+
+#include <cstring>
+
+/* --------------------------------------------------------------------
+ *  小工具
+ * -------------------------------------------------------------------- */
+
+namespace
+{
+
+const QByteArray &frameMagic()
+{
+    /* 0x42464641 的小端字节序列 */
+    static const QByteArray magic = QByteArray::fromHex("41464642");
+    return magic;
+}
+
+void putU16(QByteArray &out, quint16 v)
+{
+    char buf[2];
+    qToLittleEndian(v, buf);
+    out.append(buf, 2);
+}
+
+void putU32(QByteArray &out, quint32 v)
+{
+    char buf[4];
+    qToLittleEndian(v, buf);
+    out.append(buf, 4);
+}
+
+quint16 getU16(const char *p)
+{
+    return qFromLittleEndian<quint16>(reinterpret_cast<const uchar *>(p));
+}
+
+quint32 getU32(const char *p)
+{
+    return qFromLittleEndian<quint32>(reinterpret_cast<const uchar *>(p));
+}
+
+} // namespace
+
+/* --------------------------------------------------------------------
+ *  BootFlasher
+ * -------------------------------------------------------------------- */
+
+BootFlasher::BootFlasher(QObject *parent)
+    : QObject(parent)
+{
+    m_busy.storeRelease(0);
+    m_abort.storeRelease(0);
+}
+
+quint32 BootFlasher::crc32(const QByteArray &data)
+{
+    static quint32 table[256];
+    static bool ready = false;
+
+    if (!ready) {
+        for (quint32 i = 0; i < 256; ++i) {
+            quint32 c = i;
+            for (int k = 0; k < 8; ++k)
+                c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+            table[i] = c;
+        }
+        ready = true;
+    }
+
+    quint32 crc = 0xFFFFFFFFu;
+    const uchar *p = reinterpret_cast<const uchar *>(data.constData());
+    for (int i = 0; i < data.size(); ++i)
+        crc = table[(crc ^ p[i]) & 0xFFu] ^ (crc >> 8);
+    return crc ^ 0xFFFFFFFFu;
+}
+
+QString BootFlasher::errorName(quint32 code)
+{
+    static const char *names[] = {
+        "NONE", "BAD_MAGIC", "BAD_HEADER_CRC", "BAD_PAYLOAD_CRC",
+        "UNSUPPORTED_OPCODE", "BAD_STATE", "BAD_TARGET", "RANGE",
+        "ALIGNMENT", "FLASH", "IMAGE_TOO_LARGE", "IMAGE_CRC",
+        "NO_VALID_APP", "MANIFEST", "SIGNATURE", "ROLLBACK",
+        "DECRYPTION", "UPGRADE_PATH", "FRAME_TIMEOUT",
+    };
+    if (code < sizeof(names) / sizeof(names[0]))
+        return QString::fromLatin1(names[code]);
+    return QStringLiteral("UNKNOWN(%1)").arg(code);
+}
+
+QString BootFlasher::statusText(const QByteArray &payload)
+{
+    if (payload.size() < 20)
+        return QStringLiteral("(status payload too short)");
+
+    const quint32 status = getU32(payload.constData());
+    const quint32 err    = getU32(payload.constData() + 4);
+    const quint32 wrote  = getU32(payload.constData() + 8);
+    const quint32 expect = getU32(payload.constData() + 12);
+
+    static const char *statusNames[] = {
+        "IDLE", "READY", "RECEIVING", "COMMITTED", "ERROR", "ERASING", "VERIFYING"
+    };
+    const QString st = (status < 7)
+        ? QString::fromLatin1(statusNames[status])
+        : QStringLiteral("%1").arg(status);
+
+    if (err != 0)
+        return QStringLiteral("status=%1 error=%2").arg(st, errorName(err));
+    return QStringLiteral("status=%1 %2/%3").arg(st).arg(wrote).arg(expect);
+}
+
+/* ---------------- 帧收发 ---------------- */
+
+bool BootFlasher::writeFrame(QSerialPort &port, quint16 opcode, quint16 seq,
+                             const QByteArray &payload)
+{
+    QByteArray header;
+    header.reserve(16);
+    putU32(header, BOOT_FRAME_MAGIC);
+    putU16(header, opcode);
+    putU16(header, seq);
+    putU32(header, static_cast<quint32>(payload.size()));
+    putU32(header, crc32(payload));
+
+    QByteArray frame = header;
+    putU32(frame, crc32(header));
+    frame += payload;
+
+    if (port.write(frame) != frame.size())
+        return false;
+    port.flush();
+    port.waitForBytesWritten(1000);
+    return true;
+}
+
+bool BootFlasher::readFrame(QSerialPort &port, quint16 expectOpcode,
+                            QByteArray *payload, int timeoutMs, QString *err)
+{
+    QByteArray buf;
+    QElapsedTimer timer;
+    timer.start();
+
+    for (;;) {
+        /* 1. 对齐到 magic */
+        while (buf.size() >= 4 && buf.left(4) != frameMagic()) {
+            if (m_abort.loadAcquire()) {
+                if (err) *err = QStringLiteral("已取消");
+                return false;
+            }
+            buf.remove(0, 1);
+        }
+
+        /* 2. 头部完整后校验 */
+        if (buf.size() >= 20) {
+            const quint16 op   = getU16(buf.constData() + 4);
+            const quint32 plen = getU32(buf.constData() + 8);
+            const quint32 pcrc = getU32(buf.constData() + 12);
+            const quint32 hcrc = getU32(buf.constData() + 16);
+
+            const bool headerOk =
+                (crc32(buf.left(16)) == hcrc) &&
+                (plen <= static_cast<quint32>(BOOT_FRAME_MAX_PAYLOAD));
+
+            if (!headerOk) {
+                buf.remove(0, 1);
+                continue;
+            }
+
+            if (buf.size() >= 20 + static_cast<int>(plen)) {
+                const QByteArray body = buf.mid(20, static_cast<int>(plen));
+                if (crc32(body) != pcrc) {
+                    buf.remove(0, 1);
+                    continue;
+                }
+
+                buf.remove(0, 20 + static_cast<int>(plen));
+
+                /* 只看目标应答, 其他帧丢弃 */
+                if ((op & ~BOOT_OP_RESPONSE) != expectOpcode)
+                    continue;
+
+                if (payload) *payload = body;
+                return true;
+            }
+        }
+
+        /* 3. 需要更多数据 */
+        const int remain = timeoutMs - static_cast<int>(timer.elapsed());
+        if (remain <= 0) {
+            if (err) {
+                *err = QStringLiteral("等待应答超时 (%1 ms, 已收到 %2 字节)")
+                           .arg(timeoutMs).arg(buf.size());
+            }
+            return false;
+        }
+        port.waitForReadyRead(qMin(remain, 100));
+        buf += port.readAll();
+    }
+}
+
+bool BootFlasher::transact(QSerialPort &port, quint16 opcode, quint16 seq,
+                           const QByteArray &payload, QByteArray *response,
+                           int timeoutMs, QString *err)
+{
+    port.clear(QSerialPort::Input);
+
+    if (!writeFrame(port, opcode, seq, payload)) {
+        if (err) *err = QStringLiteral("串口写入失败");
+        return false;
+    }
+    return readFrame(port, opcode, response, timeoutMs, err);
+}
+
+/* ---------------- 打开串口 / 握手 ---------------- */
+
+bool BootFlasher::openPort(QSerialPort &port, const QString &name, QString *err)
+{
+    if (port.isOpen())
+        port.close();
+
+    port.setPortName(name);
+    port.setBaudRate(115200);
+    port.setDataBits(QSerialPort::Data8);
+    port.setParity(QSerialPort::NoParity);
+    port.setStopBits(QSerialPort::OneStop);
+    port.setFlowControl(QSerialPort::NoFlowControl);
+
+    QString last;
+    for (int i = 0; i < 10; ++i) {
+        if (port.open(QIODevice::ReadWrite)) {
+            port.clear(QSerialPort::AllDirections);
+            /* USB CDC 常要求 DTR 有效后才开始收发 */
+            port.setDataTerminalReady(true);
+            QThread::msleep(20);
+            return true;
+        }
+        last = port.errorString();
+        QThread::msleep(100);
+    }
+
+    if (err) {
+        *err = QStringLiteral("无法打开 %1: %2").arg(name, last);
+    }
+    return false;
+}
+
+bool BootFlasher::handshake(QSerialPort &port, BootHello *hello,
+                            BootDeviceInfo *info, QString *err)
+{
+    /* --- HELLO --- */
+    QByteArray rsp;
+    if (!transact(port, BOOT_OP_HELLO, 1, QByteArray(), &rsp, 500, err))
+        return false;
+
+    if (rsp.size() != 28) {
+        if (err) *err = QStringLiteral("HELLO 应答长度异常 (%1)").arg(rsp.size());
+        return false;
+    }
+
+    if (hello) {
+        hello->protocolVersion = getU32(rsp.constData() + 0);
+        hello->targetId        = getU32(rsp.constData() + 4);
+        hello->flashSize       = getU32(rsp.constData() + 8);
+        hello->appBase         = getU32(rsp.constData() + 12);
+        hello->slotSize        = getU32(rsp.constData() + 16);
+        hello->maxChunkSize    = getU32(rsp.constData() + 20);
+        hello->capabilities    = getU32(rsp.constData() + 24);
+    }
+
+    /* --- GET_DEVICE_INFO --- */
+    if (!transact(port, BOOT_OP_GET_DEVICE_INFO, 2, QByteArray(), &rsp, 800, err))
+        return false;
+
+    if (rsp.size() != 56) {
+        if (err) *err = QStringLiteral("DEVICE_INFO 应答长度异常 (%1)").arg(rsp.size());
+        return false;
+    }
+
+    if (info) {
+        info->protocolVersion = getU32(rsp.constData() + 0);
+        info->targetId        = getU32(rsp.constData() + 4);
+        info->boardId         = getU32(rsp.constData() + 8);
+        /* +12 board_revision, +16 flash_layout_id */
+        info->flashLayoutId   = getU32(rsp.constData() + 16);
+        /* +20 flash_base, +24 flash_size */
+        info->appBase         = getU32(rsp.constData() + 28);
+        /* +32 metadata_base, +36 metadata_size, +40 erase_size */
+        info->writeSize       = getU32(rsp.constData() + 44);
+        info->maxChunkSize    = getU32(rsp.constData() + 48);
+    }
+
+    return true;
+}
+
+/* ---------------- 探测 ---------------- */
+
+void BootFlasher::probe(const QString &portName)
+{
+    m_busy.storeRelease(1);
+    m_abort.storeRelease(0);
+
+    QSerialPort port;
+    QString err;
+
+    if (!openPort(port, portName, &err)) {
+        m_busy.storeRelease(0);
+        emit probeFinished(false, err);
+        return;
+    }
+
+    BootHello hello;
+    BootDeviceInfo info;
+    if (!handshake(port, &hello, &info, &err)) {
+        port.close();
+        m_busy.storeRelease(0);
+        emit probeFinished(false, err);
+        return;
+    }
+    port.close();
+    m_busy.storeRelease(0);
+
+    const QString summary = QStringLiteral(
+        "协议 0x%1 · target 0x%2 · board 0x%3 · APP 0x%4 · chunk %5")
+        .arg(hello.protocolVersion, 8, 16, QLatin1Char('0'))
+        .arg(hello.targetId, 8, 16, QLatin1Char('0'))
+        .arg(info.boardId, 8, 16, QLatin1Char('0'))
+        .arg(hello.appBase, 8, 16, QLatin1Char('0'))
+        .arg(hello.maxChunkSize);
+
+    emit probeFinished(hello.protocolVersion == BOOT_PROTOCOL_VERSION, summary);
+}
+
+/* ---------------- 烧录 ---------------- */
+
+void BootFlasher::flash(const QString &portName, const QString &imagePath,
+                        bool skipBootHeader)
+{
+    m_busy.storeRelease(1);
+    m_abort.storeRelease(0);
+
+    QSerialPort port;
+
+    auto fail = [&](const QString &msg) {
+        if (port.isOpen())
+            port.close();
+        m_busy.storeRelease(0);
+        emit flashFinished(false, msg);
+    };
+
+    /* --- 读取固件 --- */
+    QFile file(imagePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        fail(QStringLiteral("无法打开固件文件: %1").arg(imagePath));
+        return;
+    }
+    QByteArray image = file.readAll();
+    file.close();
+
+    if (image.isEmpty()) {
+        fail(QStringLiteral("固件文件为空"));
+        return;
+    }
+
+    const int rawSize = image.size();
+    if (skipBootHeader) {
+        if (rawSize <= static_cast<int>(BOOT_IMAGE_HEADER_SIZE)) {
+            fail(QStringLiteral("文件只有 %1 字节, 比 BOOTLOADER 头还小, "
+                                "没有可烧录的 APP 区").arg(rawSize));
+            return;
+        }
+        image.remove(0, static_cast<int>(BOOT_IMAGE_HEADER_SIZE));
+    }
+
+    emit logLine(QStringLiteral("固件: %1  (%2 字节%3)")
+        .arg(QFileInfo(imagePath).fileName())
+        .arg(rawSize)
+        .arg(skipBootHeader
+             ? QStringLiteral(", 已跳过前 0x6000 字节 BOOTLOADER 头 → APP %1 字节")
+                   .arg(image.size())
+             : QStringLiteral(", 按纯 APP 镜像整包烧录")));
+
+    /* --- 打开串口 + 握手 --- */
+    QString err;
+    if (!openPort(port, portName, &err)) {
+        fail(err);
+        return;
+    }
+    emit logLine(QStringLiteral("串口 %1 已打开").arg(portName));
+
+    BootHello hello;
+    BootDeviceInfo info;
+    if (!handshake(port, &hello, &info, &err)) {
+        fail(QStringLiteral("握手失败: %1").arg(err));
+        return;
+    }
+
+    emit logLine(QStringLiteral(
+        "HELLO ok: 协议 0x%1, target 0x%2, APP 基址 0x%3, slot %4, chunk %5")
+        .arg(hello.protocolVersion, 8, 16, QLatin1Char('0'))
+        .arg(hello.targetId, 8, 16, QLatin1Char('0'))
+        .arg(hello.appBase, 8, 16, QLatin1Char('0'))
+        .arg(hello.slotSize).arg(hello.maxChunkSize));
+    emit logLine(QStringLiteral(
+        "DEVICE_INFO ok: board 0x%1, layout 0x%2, 写对齐 %3")
+        .arg(info.boardId, 8, 16, QLatin1Char('0'))
+        .arg(info.flashLayoutId, 8, 16, QLatin1Char('0'))
+        .arg(info.writeSize));
+
+    if (hello.protocolVersion != BOOT_PROTOCOL_VERSION) {
+        fail(QStringLiteral("协议版本不匹配: 设备 0x%1, 上位机 0x%2")
+             .arg(hello.protocolVersion, 8, 16, QLatin1Char('0'))
+             .arg(BOOT_PROTOCOL_VERSION, 8, 16, QLatin1Char('0')));
+        return;
+    }
+
+    if (skipBootHeader && hello.appBase != BOOT_IMAGE_HEADER_SIZE) {
+        emit logLine(QStringLiteral(
+            "⚠ 设备报告 APP 基址 0x%1, 与预期的 0x%2 不一致, 请确认固件是否匹配")
+            .arg(hello.appBase, 8, 16, QLatin1Char('0'))
+            .arg(static_cast<uint>(BOOT_IMAGE_HEADER_SIZE), 8, 16, QLatin1Char('0')));
+    }
+
+    /* --- 对齐与分块 --- */
+    const int align = info.writeSize > 0 ? static_cast<int>(info.writeSize) : 2;
+    const int rem = image.size() % align;
+    if (rem != 0)
+        image.append(QByteArray(align - rem, '\xFF'));
+
+    if (static_cast<quint32>(image.size()) > hello.slotSize) {
+        fail(QStringLiteral("镜像 %1 字节超出设备 slot (%2 字节)")
+             .arg(image.size()).arg(hello.slotSize));
+        return;
+    }
+
+    int usable = qMin<int>(static_cast<int>(hello.maxChunkSize),
+                           BOOT_FRAME_MAX_PAYLOAD - BOOT_DATA_PREFIX_SIZE);
+    usable -= usable % align;
+    if (usable <= 0) {
+        fail(QStringLiteral("设备报告的 max_chunk_size 不可用 (%1)").arg(hello.maxChunkSize));
+        return;
+    }
+
+    const quint32 imageCrc = crc32(image);
+
+    /* --- BEGIN --- */
+    QByteArray begin;
+    putU32(begin, hello.targetId);
+    putU32(begin, info.boardId);
+    putU32(begin, info.flashLayoutId);
+    putU32(begin, static_cast<quint32>(image.size()));
+    putU32(begin, imageCrc);
+    putU32(begin, 1u);      /* firmware version */
+    putU32(begin, 0u);      /* flags: 裸 BIN, 不校验签名、不加密 */
+    putU32(begin, 0u);      /* security version */
+    putU32(begin, 0u);      /* min source version */
+
+    QByteArray rsp;
+    quint16 seq = 3;
+    if (!transact(port, BOOT_OP_BEGIN, seq++, begin, &rsp, 6000, &err)) {
+        fail(QStringLiteral("BEGIN 无应答: %1").arg(err));
+        return;
+    }
+    if (rsp.size() < 20 || getU32(rsp.constData() + 4) != 0) {
+        fail(QStringLiteral("BEGIN 失败: %1").arg(statusText(rsp)));
+        return;
+    }
+    emit logLine(QStringLiteral("BEGIN ok (%1 字节, crc 0x%2)")
+        .arg(image.size())
+        .arg(imageCrc, 8, 16, QLatin1Char('0')));
+
+    /* --- DATA --- */
+    const int total = (image.size() + usable - 1) / usable;
+    int index = 0;
+
+    for (int offset = 0; offset < image.size(); offset += usable) {
+        if (m_abort.loadAcquire()) {
+            transact(port, BOOT_OP_ABORT, seq++, QByteArray(), &rsp, 1000, nullptr);
+            fail(QStringLiteral("已被用户取消"));
+            return;
+        }
+
+        const QByteArray chunk = image.mid(offset, usable);
+
+        QByteArray payload;
+        putU32(payload, static_cast<quint32>(offset));
+        putU32(payload, static_cast<quint32>(chunk.size()));
+        payload += chunk;
+
+        if (!transact(port, BOOT_OP_DATA, seq++, payload, &rsp, 1500, &err)) {
+            fail(QStringLiteral("DATA 0x%1 无应答: %2")
+                 .arg(offset, 6, 16, QLatin1Char('0')).arg(err));
+            return;
+        }
+        if (rsp.size() < 20 || getU32(rsp.constData() + 4) != 0) {
+            fail(QStringLiteral("DATA 写 0x%1 失败: %2")
+                 .arg(offset, 6, 16, QLatin1Char('0')).arg(statusText(rsp)));
+            return;
+        }
+
+        ++index;
+        const quint32 wrote = getU32(rsp.constData() + 8);
+        const int pct = static_cast<int>(static_cast<qint64>(wrote) * 100
+                                         / image.size());
+        emit progress(qBound(0, pct, 99),
+                      QStringLiteral("写入 %1/%2 块").arg(index).arg(total));
+        emit logLine(QStringLiteral("DATA %1/%2  0x%3  ok  (%4%)")
+            .arg(index).arg(total)
+            .arg(offset, 6, 16, QLatin1Char('0'))
+            .arg(pct));
+    }
+
+    /* --- COMMIT --- */
+    QByteArray commit;
+    putU32(commit, static_cast<quint32>(image.size()));
+    putU32(commit, imageCrc);
+
+    if (!transact(port, BOOT_OP_COMMIT, seq++, commit, &rsp, 5000, &err)) {
+        fail(QStringLiteral("COMMIT 无应答: %1").arg(err));
+        return;
+    }
+
+    const quint32 lastErr = rsp.size() >= 20 ? getU32(rsp.constData() + 4) : 0xFFFFFFFFu;
+    const quint32 status  = rsp.size() >= 20 ? getU32(rsp.constData() + 0) : 0xFFFFFFFFu;
+    if (lastErr != 0 || status != 3) {
+        fail(QStringLiteral("COMMIT 失败: %1").arg(statusText(rsp)));
+        return;
+    }
+
+    emit progress(100, QStringLiteral("烧录完成"));
+    emit logLine(QStringLiteral("COMMIT ok — 固件已写入并校验通过"));
+
+    port.close();
+    m_busy.storeRelease(0);
+    emit flashFinished(true, QString());
+}
+
+/* ---------------- 重启读卡器 ---------------- */
+
+void BootFlasher::bootApp(const QString &portName)
+{
+    m_busy.storeRelease(1);
+    m_abort.storeRelease(0);
+
+    QSerialPort port;
+    QString err;
+
+    if (!openPort(port, portName, &err)) {
+        m_busy.storeRelease(0);
+        emit bootAppFinished(false, err);
+        return;
+    }
+
+    /* BOOT_APP 会让 MCU 立刻复位, 应答可能来不及发回, 超时不算失败 */
+    QByteArray rsp;
+    const bool answered = transact(port, BOOT_OP_BOOT_APP, 1, QByteArray(),
+                                   &rsp, 800, nullptr);
+
+    port.close();
+    m_busy.storeRelease(0);
+
+    if (answered && rsp.size() >= 20 && getU32(rsp.constData() + 4) != 0) {
+        emit bootAppFinished(false,
+            QStringLiteral("设备拒绝启动应用: %1").arg(statusText(rsp)));
+        return;
+    }
+
+    emit bootAppFinished(true, QString());
+}
