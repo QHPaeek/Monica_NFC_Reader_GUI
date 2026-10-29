@@ -38,12 +38,28 @@ struct ComPortInfo
     }
 };
 
+/* 顶部设备下拉框的一项: HID 读卡器 或 串口 */
+struct DeviceEntry
+{
+    enum Kind { Hid, Serial };
+
+    Kind    kind = Serial;
+    QString key;          // HID: 设备 path; Serial: "COM3"
+    QString display;      // 下拉框显示文本
+    quint16 vid = 0;
+    quint16 pid = 0;
+    bool    hasIds = false;
+    bool    isBootloader = false;
+
+    bool isHid() const { return kind == Hid; }
+};
+
 namespace PortScan
 {
     /* 当前系统的全部串口 (按 COM 号自然排序) */
     QList<ComPortInfo> listComPorts();
 
-    /* 找到 Affine Bootloader 的串口; 找不到返回 false */
+    /* 找 Affine Bootloader 的串口; 找不到返回 false */
     bool findBootloaderPort(ComPortInfo *out);
 
     /* 是否存在指定 VID/PID 的 USB 设备 (不限于串口) */
@@ -51,6 +67,12 @@ namespace PortScan
 
     /* 逐字打印串口列表, 供日志使用 */
     QString describePorts();
+
+    /* 顶部下拉框用: 已识别的 HID 读卡器 + 全部串口 */
+    QList<DeviceEntry> listDevices();
+
+    /* VID/PID → 人类可读标签 ("Monica Bootloader" / "Monica Reader" / "") */
+    QString deviceTag(quint16 vid, quint16 pid);
 }
 
 #endif // PORTSCAN_H

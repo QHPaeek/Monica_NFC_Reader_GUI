@@ -2,6 +2,8 @@
 
 #include <QtSerialPort/QSerialPortInfo>
 
+#include <hidapi.h>
+
 #include <QStringList>
 #include <QRegularExpression>
 
@@ -169,6 +171,75 @@ QString describePorts()
         lines.append(QStringLiteral("  %1%2").arg(p.displayName(), tag));
     }
     return lines.join(QLatin1Char('\n'));
+}
+
+QString deviceTag(quint16 vid, quint16 pid)
+{
+    if (vid != BOOT_USB_VID)
+        return QString();
+    if (pid == BOOT_USB_PID_BOOTLOADER)
+        return QStringLiteral("Monica Bootloader");
+    if (pid == BOOT_USB_PID_APP)
+        return QStringLiteral("Monica Reader");
+    if (pid == BOOT_USB_PID_DFU)
+        return QStringLiteral("ST DFU");
+    return QString();
+}
+
+QList<DeviceEntry> listDevices()
+{
+    QList<DeviceEntry> out;
+
+    /* ---- 1. HID 读卡器 (与 HIDWorker 相同判据: Usage Page 0xAFCA) ---- */
+    hid_device_info *devs = hid_enumerate(0, 0);
+    for (hid_device_info *cur = devs; cur != nullptr; cur = cur->next) {
+        if (cur->usage_page != 0xAFCA)
+            continue;
+
+        DeviceEntry e;
+        e.kind     = DeviceEntry::Hid;
+        e.key      = QString::fromUtf8(cur->path);
+        e.vid      = cur->vendor_id;
+        e.pid      = cur->product_id;
+        e.hasIds   = true;
+
+        QString name = (cur->product_string != nullptr)
+            ? QString::fromWCharArray(cur->product_string)
+            : QString();
+        if (name.trimmed().isEmpty())
+            name = QStringLiteral("Monica NFC Reader");
+
+        e.display = QStringLiteral("%1（HID）").arg(name);
+        out.append(e);
+    }
+    if (devs)
+        hid_free_enumeration(devs);
+
+    /* ---- 2. 全部串口 ---- */
+    const auto ports = listComPorts();
+    for (const ComPortInfo &p : ports) {
+        DeviceEntry e;
+        e.kind     = DeviceEntry::Serial;
+        e.key      = p.portName;
+        e.vid      = p.vid;
+        e.pid      = p.pid;
+        e.hasIds   = p.hasUsbIds;
+        e.isBootloader = p.isBootloader();
+
+        /* 形如: "COM3 USB 串行设备（Monica Bootloader）" */
+        QString d = p.portName;
+        if (!p.description.isEmpty())
+            d += QLatin1Char(' ') + p.description;
+
+        const QString tag = deviceTag(p.vid, p.pid);
+        if (!tag.isEmpty())
+            d += QStringLiteral("（%1）").arg(tag);
+
+        e.display = d;
+        out.append(e);
+    }
+
+    return out;
 }
 
 } // namespace PortScan

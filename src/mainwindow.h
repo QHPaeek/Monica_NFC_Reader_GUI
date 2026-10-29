@@ -157,10 +157,18 @@ private:
     void    updateFirmwareEntryState();
     void    refreshPortCombo();
     bool    bootloaderPort(ComPortInfo *out) const;
+    bool    bootloaderConnected(ComPortInfo *out) const;
     bool    dfuDevicePresent() const;
     void    showEnterDialog(int mode, const QString &text);
     void    finishEnterSuccess();
+    void    scheduleSerialProbe(int delayMs);
     int     configuredBaud() const;
+
+    /* 顶部设备下拉框的当前选择 */
+    QString selectedSerialPort() const;   // 选的是串口时返回 COM 名, 否则空
+    QString selectedHidPath() const;
+    bool    selectedIsHid() const;
+
     static QString idmToDecimal(const QByteArray &idm);
 
     /* 辅助 */
@@ -250,7 +258,6 @@ private:
     /* 固件升级页 — BOOTLOADER 区 */
     QPushButton    *m_bootEnterBtn;
     QComboBox      *m_bootPortCombo;
-    QPushButton    *m_bootPortRefreshBtn;
     QLabel         *m_bootStateLabel;
     QLineEdit      *m_bootFileEdit;
     QPushButton    *m_bootBrowseBtn;
@@ -279,7 +286,11 @@ private:
     int             m_enterWaitedMs;  // 已等待毫秒
     bool            m_enterNotified;  // 1 秒提示是否已给出
     bool            m_suppressPortSignal;
-    QString         m_portSignature;  // 串口列表比对签名
+    QString         m_portSignature;  // 串口/设备列表比对签名
+    QString         m_bootVerifiedPort;   // 已通过协议握手确认的 bootloader 串口
+    bool            m_connectProbePending; // 「连接」按钮触发的探测等待中
+    QString         m_probePort;           // 当前正在探测的串口
+    int             m_probeRetry = 0;      // 进入 BOOT 后的握手重试次数
 
     /* BOOTLOADER 烧录线程 */
     QThread        *m_bootThread;

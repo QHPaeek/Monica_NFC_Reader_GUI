@@ -87,7 +87,6 @@ MainWindow::MainWindow(QWidget *parent)
     , m_lastCardType(Card_None)
     , m_bootEnterBtn(nullptr)
     , m_bootPortCombo(nullptr)
-    , m_bootPortRefreshBtn(nullptr)
     , m_bootStateLabel(nullptr)
     , m_bootFileEdit(nullptr)
     , m_bootBrowseBtn(nullptr)
@@ -103,6 +102,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_enterWaitedMs(0)
     , m_enterNotified(false)
     , m_suppressPortSignal(false)
+    , m_connectProbePending(false)
     , m_bootThread(nullptr)
     , m_bootFlasher(nullptr)
     , m_bootBusy(false)
@@ -220,6 +220,9 @@ void MainWindow::setupUI()
     m_lblVersion->setObjectName(QStringLiteral("statusVersion"));
     statusBar()->addPermanentWidget(m_lblVersion);
     statusBar()->setObjectName(QStringLiteral("appStatusBar"));
+
+    /* 立刻填一次设备列表, 否则启动后 1 秒内下拉框是空的 */
+    refreshPortCombo();
 }
 
 // ====================================================================
@@ -297,6 +300,32 @@ QWidget* MainWindow::buildHeaderPanel()
         m_writeCardInput->setFocus();
     });
 
+    /* 顶部设备选择: 已识别的 HID 读卡器 + 全部串口, 每秒自动刷新。
+     * 这里只负责"选中", 真正连接仍要手动点「连接」。
+     */
+    m_bootPortCombo = new QComboBox(header);
+    m_bootPortCombo->setObjectName(QStringLiteral("deviceCombo"));
+    m_bootPortCombo->setMinimumWidth(170);
+    m_bootPortCombo->setSizeAdjustPolicy(
+        QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_bootPortCombo->setToolTip(QString::fromUtf8(
+        "已识别的 HID 读卡器与系统全部串口。\n"
+        "VID/PID 匹配的设备会自动选中，但需要手动点「连接」。"));
+
+    /* 手动切换后, 如果是串口就尝试握手确认是否为 BOOTLOADER */
+    connect(m_bootPortCombo,
+            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) {
+        if (m_suppressPortSignal || m_bootBusy)
+            return;
+        const QString port = selectedSerialPort();
+        if (port.isEmpty())
+            return;
+        m_probePort = port;
+        QMetaObject::invokeMethod(m_bootFlasher, "probe",
+                                  Qt::QueuedConnection, Q_ARG(QString, port));
+    });
+
     hbox->addWidget(title);
     hbox->addWidget(btnTutorial);
     hbox->addSpacing(12);
@@ -307,6 +336,8 @@ QWidget* MainWindow::buildHeaderPanel()
     hbox->addWidget(m_lblConnStatus);
     hbox->addSpacing(20);
     hbox->addWidget(m_lblFwVersion);
+    hbox->addSpacing(12);
+    hbox->addWidget(m_bootPortCombo);
     hbox->addStretch();
     hbox->addWidget(m_btnLang);
     hbox->addSpacing(8);
@@ -474,24 +505,14 @@ QWidget* MainWindow::buildFirmwarePage()
 
     m_bootEnterBtn = new QPushButton(QString::fromUtf8("进入 BOOTLOADER"), bootBox);
     m_bootEnterBtn->setObjectName(QStringLiteral("btnPrimary"));
+    m_bootEnterBtn->setToolTip(QString::fromUtf8(
+        "目标串口在窗口顶部下拉框中选择。\n"
+        "HID 已连接时走 0x62 命令；HID 未连接时通过该串口发送 AimeIO JUMP2BOOT。"));
     connect(m_bootEnterBtn, &QPushButton::clicked,
             this, &MainWindow::onEnterBootloader);
 
-    m_bootPortCombo = new QComboBox(bootBox);
-    m_bootPortCombo->setMinimumWidth(200);
-    m_bootPortCombo->setToolTip(QString::fromUtf8(
-        "BOOTLOADER 串口 (USB CDC 或 UART)。\n"
-        "检测到 VID AFF1 / PID 52B2 的设备会自动选中。"));
-
-    m_bootPortRefreshBtn = new QPushButton(QString::fromUtf8("刷新"), bootBox);
-    m_bootPortRefreshBtn->setObjectName(QStringLiteral("btnSecondary"));
-    m_bootPortRefreshBtn->setFixedWidth(56);
-    connect(m_bootPortRefreshBtn, &QPushButton::clicked,
-            this, &MainWindow::refreshPortCombo);
-
     bootEnterRow->addWidget(m_bootEnterBtn);
-    bootEnterRow->addWidget(m_bootPortCombo, 1);
-    bootEnterRow->addWidget(m_bootPortRefreshBtn);
+    bootEnterRow->addStretch();
 
     m_bootStateLabel = new QLabel(QString::fromUtf8("未检测到 BOOTLOADER"), bootBox);
     m_bootStateLabel->setObjectName(QStringLiteral("tabDesc"));
@@ -637,20 +658,6 @@ QWidget* MainWindow::buildFirmwarePage()
     connect(m_portTimer, &QTimer::timeout,
             this, &MainWindow::refreshPortCombo);
     m_portTimer->start();
-
-    /* ---- 手动切换串口后验证一次 ---- */
-    connect(m_bootPortCombo,
-            QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int) {
-        if (m_suppressPortSignal || m_bootBusy)
-            return;
-        const QString port = m_bootPortCombo->currentData().toString();
-        if (port.isEmpty())
-            return;
-        QMetaObject::invokeMethod(m_bootFlasher, "probe",
-                                  Qt::QueuedConnection,
-                                  Q_ARG(QString, port));
-    });
 
     /* ---- 进入 BOOT/DFU 后的等待计时器 ---- */
     m_enterTimer = new QTimer(this);
@@ -1467,18 +1474,51 @@ void MainWindow::onConnectClicked()
 {
     m_stackedRight->setCurrentIndex(0);  // 切换回设置页
     m_btnDfu->show();
-    m_lblStatusMsg->setText(trC(
-        QStringLiteral("正在搜索设备..."),
-        QStringLiteral("Searching for device...")));
+
+    /* ---- 选中项是 HID 读卡器 → 走原有 HID 连接流程 ---- */
+    if (selectedIsHid()) {
+        m_lblStatusMsg->setText(trC(
+            QStringLiteral("正在搜索设备..."),
+            QStringLiteral("Searching for device...")));
+        m_btnConnect->setEnabled(false);
+        disarmFlashReadTimeout();
+        m_hid->stop();
+        m_hid->start();
+        return;
+    }
+
+    /* ---- 选中项是串口 → 握手指令确认它是不是 BOOTLOADER ---- */
+    const QString port = selectedSerialPort();
+    if (port.isEmpty()) {
+        QMessageBox::information(this,
+            trC(QString::fromUtf8("未选择设备"),
+                QStringLiteral("No Device Selected")),
+            trC(QString::fromUtf8(
+                    "请先在窗口顶部的下拉框中选择 HID 读卡器或串口。"),
+                QStringLiteral(
+                    "Pick a HID reader or a serial port in the top drop-down first.")));
+        return;
+    }
+
+    m_connectProbePending = true;
+    m_probePort = port;
     m_btnConnect->setEnabled(false);
     disarmFlashReadTimeout();
-    m_hid->stop();
-    m_hid->start();
+
+    m_lblStatusMsg->setText(trC(
+        QString::fromUtf8("正在检测 %1 ...").arg(port),
+        QStringLiteral("Probing %1...").arg(port)));
+
+    QMetaObject::invokeMethod(m_bootFlasher, "probe",
+                              Qt::QueuedConnection, Q_ARG(QString, port));
 }
 
 void MainWindow::onDisconnectClicked()
 {
+    m_bootVerifiedPort.clear();
+    m_connectProbePending = false;
     m_hid->stop();
+    updateFirmwareEntryState();
 }
 
 void MainWindow::onReadSettings()
@@ -1602,7 +1642,7 @@ void MainWindow::onFirmwareUpgradeClicked()
     if (m_dfuToolPath.isEmpty())
         onDfuCheckTool();
 
-    const bool bootHere = bootloaderPort(nullptr);
+    const bool bootHere = bootloaderConnected(nullptr);
     const bool dfuHere  = dfuDevicePresent();
 
     updateFirmwareEntryState();
@@ -1638,7 +1678,7 @@ void MainWindow::onEnterBootloader()
     if (m_bootBusy)
         return;
 
-    if (bootloaderPort(nullptr)) {
+    if (bootloaderConnected(nullptr)) {
         QMessageBox::information(this,
             trC(QString::fromUtf8("已在 BOOTLOADER"),
                 QStringLiteral("Already in Bootloader")),
@@ -1651,28 +1691,38 @@ void MainWindow::onEnterBootloader()
 
     /* ---------- 情况 A: HID 未连接 → 走串口发 AimeIO JUMP2BOOT ---------- */
     if (!m_connected) {
-        const QString port = m_bootPortCombo
-            ? m_bootPortCombo->currentData().toString()
-            : QString();
+        const QString port = selectedSerialPort();
 
         if (port.isEmpty()) {
             QMessageBox::warning(this,
                 trC(QString::fromUtf8("请选择串口"),
                     QStringLiteral("Select a Port")),
-                trC(QString::fromUtf8(
-                        "HID 未连接。\n\n"
-                        "请先在「进入 BOOTLOADER」右侧的下拉框中选择读卡器所在的串口"
+                selectedIsHid()
+                ? trC(QString::fromUtf8(
+                        "HID 读卡器尚未连接。\n\n"
+                        "请先点右上角「连接」建立 HID 连接；\n"
+                        "或者在上面下拉框中改选读卡器所在的串口"
+                        "（UART 转接板 / CDC），再点「进入 BOOTLOADER」。"),
+                    QStringLiteral(
+                        "The HID reader is not connected yet.\n\n"
+                        "Click Connect first, or pick the reader's serial port "
+                        "in the top drop-down and click Enter Bootloader again."))
+                : trC(QString::fromUtf8(
+                        "HID 未连接，且当前没有选中可用的串口。\n\n"
+                        "请在窗口顶部的下拉框中选择读卡器所在的串口"
                         "（UART 转接板或 CDC），再点一次「进入 BOOTLOADER」。"),
                     QStringLiteral(
-                        "HID is not connected.\n\n"
-                        "Pick the reader's serial port in the drop-down next to "
-                        "\"Enter Bootloader\" first, then click it again.")));
+                        "HID is not connected and no serial port is selected.\n\n"
+                        "Pick the reader's serial port in the top drop-down, "
+                        "then click Enter Bootloader again.")));
             return;
         }
 
         showEnterDialog(1, trC(
             QString::fromUtf8("正在通过串口尝试进入 BOOTLOADER…\n（%1）").arg(port),
             QStringLiteral("Trying to enter the bootloader over %1...").arg(port)));
+
+        m_probeRetry = 0;
 
         m_lblStatusMsg->setText(trC(
             QString::fromUtf8("正在通过 %1 发送 JUMP2BOOT…").arg(port),
@@ -1746,6 +1796,26 @@ void MainWindow::showEnterDialog(int mode, const QString &text)
     updateFirmwareEntryState();
 
     m_enterTimer->start();
+}
+
+/* 延时探测当前串口是否已经变成 bootloader。
+ * UART 下跳转后端口号不变, 且 bootloader 初始化串口需要一点时间,
+ * 所以失败会由 onProbeFinished 再排一次, 最多 3 次。
+ */
+void MainWindow::scheduleSerialProbe(int delayMs)
+{
+    QTimer::singleShot(delayMs, this, [this]() {
+        if (m_enterMode != 1)
+            return;
+
+        const QString port = selectedSerialPort();
+        if (port.isEmpty())
+            return;
+
+        m_probePort = port;
+        QMetaObject::invokeMethod(m_bootFlasher, "probe",
+                                  Qt::QueuedConnection, Q_ARG(QString, port));
+    });
 }
 
 /* 确认已进入 BOOT/DFU 后的统一收尾 */
@@ -1831,7 +1901,7 @@ void MainWindow::pollEnterResult()
 
     m_enterWaitedMs += m_enterTimer->interval();
 
-    const bool ok = (m_enterMode == 1) ? bootloaderPort(nullptr)
+    const bool ok = (m_enterMode == 1) ? bootloaderConnected(nullptr)
                                        : dfuDevicePresent();
 
     if (ok) {
@@ -1900,53 +1970,113 @@ void MainWindow::refreshPortCombo()
     if (!m_bootPortCombo)
         return;
 
-    const auto ports = PortScan::listComPorts();
+    const auto devices = PortScan::listDevices();
 
     /* 列表没变化就不重建, 避免打断用户展开的下拉框 */
     QString signature;
-    for (const ComPortInfo &p : ports)
-        signature += p.portName + QLatin1Char('|') + p.description
-                   + QLatin1Char('|') + QString::number(p.vid) + QLatin1Char(':')
-                   + QString::number(p.pid) + QLatin1Char(';');
+    for (const DeviceEntry &d : devices) {
+        signature += QString::number(static_cast<int>(d.kind)) + QLatin1Char('|')
+                   + d.key + QLatin1Char('|') + d.display + QLatin1Char(';');
+    }
 
-    const bool bootHere = bootloaderPort(nullptr);
+    const bool bootHere = bootloaderConnected(nullptr);
     signature += bootHere ? QStringLiteral("#boot") : QStringLiteral("#noboot");
     signature += dfuDevicePresent() ? QStringLiteral("#dfu") : QStringLiteral("#nodfu");
 
-    if (signature == m_portSignature) {
-        updateFirmwareEntryState();
-        return;
+    if (signature != m_portSignature) {
+        m_portSignature = signature;
+
+        const QString prevKey  = m_bootPortCombo->currentData().toString();
+        const QString prevKind = m_bootPortCombo->currentData(Qt::UserRole + 1).toString();
+
+        m_suppressPortSignal = true;
+        m_bootPortCombo->clear();
+
+        /* 自动选中优先级: HID 读卡器 > BOOTLOADER 串口 > 维持原选择 > 第一项 */
+        int autoIdx = -1;
+        for (const DeviceEntry &d : devices) {
+            m_bootPortCombo->addItem(d.display, d.key);
+            const int idx = m_bootPortCombo->count() - 1;
+            m_bootPortCombo->setItemData(idx,
+                d.isHid() ? QStringLiteral("hid") : QStringLiteral("com"),
+                Qt::UserRole + 1);
+
+            if (autoIdx < 0 && d.isHid())
+                autoIdx = idx;
+            else if (autoIdx < 0 && d.isBootloader)
+                autoIdx = idx;
+        }
+
+        if (devices.isEmpty()) {
+            m_bootPortCombo->addItem(
+                trC(QString::fromUtf8("(未发现设备)"),
+                    QStringLiteral("(no devices)")),
+                QString());
+            m_bootPortCombo->setItemData(0, QString(), Qt::UserRole + 1);
+        } else if (autoIdx >= 0) {
+            m_bootPortCombo->setCurrentIndex(autoIdx);
+        } else {
+            int restore = -1;
+            for (int i = 0; i < m_bootPortCombo->count(); ++i) {
+                if (m_bootPortCombo->itemData(i).toString() == prevKey
+                    && m_bootPortCombo->itemData(i, Qt::UserRole + 1).toString() == prevKind) {
+                    restore = i;
+                    break;
+                }
+            }
+            m_bootPortCombo->setCurrentIndex(restore >= 0 ? restore : 0);
+        }
+
+        m_suppressPortSignal = false;
     }
-    m_portSignature = signature;
-
-    const QString prev = m_bootPortCombo->currentData().toString();
-
-    m_suppressPortSignal = true;
-    m_bootPortCombo->clear();
-
-    int autoIdx = -1;
-    for (const ComPortInfo &p : ports) {
-        m_bootPortCombo->addItem(p.displayName(), p.portName);
-        if (p.isBootloader() && autoIdx < 0)
-            autoIdx = m_bootPortCombo->count() - 1;
-    }
-
-    if (ports.isEmpty()) {
-        m_bootPortCombo->addItem(
-            trC(QString::fromUtf8("(无可用串口)"),
-                QStringLiteral("(no serial ports)")),
-            QString());
-    } else if (autoIdx >= 0) {
-        m_bootPortCombo->setCurrentIndex(autoIdx);
-    } else if (!prev.isEmpty()) {
-        const int idx = m_bootPortCombo->findData(prev);
-        if (idx >= 0)
-            m_bootPortCombo->setCurrentIndex(idx);
-    }
-
-    m_suppressPortSignal = false;
 
     updateFirmwareEntryState();
+}
+
+/* 当前下拉框选中的串口名; 选的不是串口则返回空 */
+QString MainWindow::selectedSerialPort() const
+{
+    if (!m_bootPortCombo)
+        return QString();
+    if (m_bootPortCombo->currentData(Qt::UserRole + 1).toString()
+        != QStringLiteral("com"))
+        return QString();
+    return m_bootPortCombo->currentData().toString();
+}
+
+QString MainWindow::selectedHidPath() const
+{
+    if (!m_bootPortCombo)
+        return QString();
+    if (m_bootPortCombo->currentData(Qt::UserRole + 1).toString()
+        != QStringLiteral("hid"))
+        return QString();
+    return m_bootPortCombo->currentData().toString();
+}
+
+bool MainWindow::selectedIsHid() const
+{
+    return !selectedHidPath().isEmpty();
+}
+
+/* bootloader 是否在线:
+ *   1) 存在 VID AFF1 / PID 52B2 的端口 (USB CDC)
+ *   2) 或者某个串口已被协议握手确认 (UART, 端口号不变)
+ */
+bool MainWindow::bootloaderConnected(ComPortInfo *out) const
+{
+    if (bootloaderPort(out))
+        return true;
+
+    if (!m_bootVerifiedPort.isEmpty()) {
+        for (const ComPortInfo &p : PortScan::listComPorts()) {
+            if (p.portName.compare(m_bootVerifiedPort, Qt::CaseInsensitive) == 0) {
+                if (out) *out = p;
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 void MainWindow::updateFirmwareEntryState()
@@ -1955,11 +2085,14 @@ void MainWindow::updateFirmwareEntryState()
         return;
 
     ComPortInfo boot;
-    const bool bootHere = bootloaderPort(&boot);
+    const bool bootHere = bootloaderConnected(&boot);
     const bool dfuHere  = dfuDevicePresent();
     const bool anyMode  = bootHere || dfuHere;
 
-    /* 任一通道已连接 → 两个「进入」按钮都置灰 */
+    /* 任一通道已连接 → 两个「进入」按钮都置灰。
+     * bootHere 同时覆盖了"UART 上已握手确认"的情况,
+     * 否则 UART 进 BOOT 后 DFU 按钮会错误地重新亮起。
+     */
     m_bootEnterBtn->setEnabled(!anyMode && !m_bootBusy);
     m_dfuEnterBtn->setEnabled(!anyMode && !m_bootBusy);
 
@@ -2059,16 +2192,16 @@ void MainWindow::onBootFlash()
     if (m_bootBusy || m_bootFilePath.isEmpty())
         return;
 
-    const QString port = m_bootPortCombo->currentData().toString();
+    const QString port = selectedSerialPort();
     if (port.isEmpty()) {
         QMessageBox::warning(this,
             trC(QString::fromUtf8("未选择串口"), QStringLiteral("No Port")),
-            trC(QString::fromUtf8("请先在下拉框中选择 BOOTLOADER 的串口。"),
-                QStringLiteral("Select the bootloader serial port first.")));
+            trC(QString::fromUtf8("请先在窗口顶部的下拉框中选择读卡器所在的串口。"),
+                QStringLiteral("Pick the reader's serial port in the top drop-down first.")));
         return;
     }
 
-    if (!bootloaderPort(nullptr)) {
+    if (!bootloaderConnected(nullptr)) {
         auto r = QMessageBox::question(this,
             trC(QString::fromUtf8("确认烧录"), QStringLiteral("Confirm Flash")),
             trC(QString::fromUtf8(
@@ -2165,12 +2298,12 @@ void MainWindow::onRebootReader()
     if (m_bootBusy)
         return;
 
-    const QString port = m_bootPortCombo->currentData().toString();
+    const QString port = selectedSerialPort();
     if (port.isEmpty()) {
         QMessageBox::warning(this,
             trC(QString::fromUtf8("未选择串口"), QStringLiteral("No Port")),
-            trC(QString::fromUtf8("请先选择 BOOTLOADER 的串口。"),
-                QStringLiteral("Select the bootloader serial port first.")));
+            trC(QString::fromUtf8("请先在窗口顶部的下拉框中选择读卡器所在的串口。"),
+                QStringLiteral("Pick the reader's serial port in the top drop-down first.")));
         return;
     }
 
@@ -2218,21 +2351,57 @@ void MainWindow::onRebootFinished(bool ok, const QString &error)
 
 void MainWindow::onProbeFinished(bool ok, const QString &summary)
 {
-    if (!m_dfuLog)
-        return;
+    const QString probed = m_probePort;
 
-    m_dfuLog->appendPlainText(ok
-        ? trC(QString::fromUtf8("[探测] 串口确认是 BOOTLOADER — %1").arg(summary),
-              QStringLiteral("[probe] bootloader confirmed — %1").arg(summary))
-        : trC(QString::fromUtf8("[探测] 该串口不是 BOOTLOADER — %1").arg(summary),
-              QStringLiteral("[probe] not a bootloader — %1").arg(summary)));
+    if (m_dfuLog) {
+        m_dfuLog->appendPlainText(ok
+            ? trC(QString::fromUtf8("[探测] 串口确认是 BOOTLOADER — %1").arg(summary),
+                  QStringLiteral("[probe] bootloader confirmed — %1").arg(summary))
+            : trC(QString::fromUtf8("[探测] 该串口不是 BOOTLOADER — %1").arg(summary),
+                  QStringLiteral("[probe] not a bootloader — %1").arg(summary)));
+    }
 
-    /* UART 方式下 bootloader 复位后仍挂在同一个串口(端口号不变),
-     * 不会出现新的 VID/PID 端口, 只能靠协议握手确认已进入。
-     * USB CDC 方式下端口会重新枚举, 由 pollEnterResult 负责。
+    /* 记住/忘掉"这个串口已确认是 bootloader"。
+     * UART 方式下端口号不变, 这是唯一能判断"已进入 BOOTLOADER"的依据。
      */
-    if (ok && m_enterMode == 1)
+    if (!probed.isEmpty()) {
+        if (ok) {
+            m_bootVerifiedPort = probed;
+        } else if (probed.compare(m_bootVerifiedPort, Qt::CaseInsensitive) == 0) {
+            m_bootVerifiedPort.clear();
+        }
+    }
+
+    if (ok && m_enterMode == 1) {
         finishEnterSuccess();
+    } else if (!ok && m_enterMode == 1 && m_probeRetry < 3) {
+        /* bootloader 刚跳过来时串口可能还没初始化好, 再试几次 */
+        ++m_probeRetry;
+        scheduleSerialProbe(1000);
+    }
+
+    if (m_connectProbePending) {
+        m_connectProbePending = false;
+        m_btnConnect->setEnabled(true);
+
+        if (ok) {
+            m_lblConnStatus->setText(QStringLiteral("BOOTLOADER"));
+            m_lblConnDot->setProperty("status", "connected");
+            m_lblConnDot->style()->unpolish(m_lblConnDot);
+            m_lblConnDot->style()->polish(m_lblConnDot);
+            m_lblStatusMsg->setText(trC(
+                QString::fromUtf8("已连接 BOOTLOADER — %1").arg(probed),
+                QStringLiteral("Bootloader connected — %1").arg(probed)));
+        } else {
+            m_lblStatusMsg->setText(trC(
+                QString::fromUtf8(
+                    "%1 未识别为 BOOTLOADER；可在「固件升级」页发送 JUMP2BOOT").arg(probed),
+                QStringLiteral(
+                    "%1 is not a bootloader; send JUMP2BOOT from the upgrade page").arg(probed)));
+        }
+    }
+
+    updateFirmwareEntryState();
 }
 
 /* ---- 串口发送 JUMP2BOOT 的结果 ---- */
@@ -2271,15 +2440,7 @@ void MainWindow::onSerialJumpSent(bool ok, const QString &error)
     /* UART 方式端口号不变, 稍等片刻后直接握手指令确认;
      * USB CDC 方式下端口会消失, probe 失败也无妨, 轮询会看到新端口。
      */
-    QTimer::singleShot(600, this, [this]() {
-        if (m_enterMode != 1 || !m_bootPortCombo)
-            return;
-        const QString port = m_bootPortCombo->currentData().toString();
-        if (port.isEmpty())
-            return;
-        QMetaObject::invokeMethod(m_bootFlasher, "probe",
-                                  Qt::QueuedConnection, Q_ARG(QString, port));
-    });
+    scheduleSerialProbe(600);
 }
 
 void MainWindow::onDfuFileBrowse()
