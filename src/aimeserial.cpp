@@ -18,6 +18,7 @@ enum : uint8_t {
     CMD_LED        = 0x60,
     CMD_JUMP2DFU   = 0x61,
     CMD_JUMP2BOOT  = 0x62,
+    CMD_LED_BRIGHT = 0x63,
     CMD_FLASH_READ = 0x70,
     CMD_FLASH_WRITE= 0x71,
     CMD_OK         = 0xFD,
@@ -30,6 +31,7 @@ bool knownCommand(uint8_t cmd)
     case CMD_FIND_CARD:
     case CMD_WRITE_CARD:
     case CMD_LED:
+    case CMD_LED_BRIGHT:
     case CMD_JUMP2DFU:
     case CMD_JUMP2BOOT:
     case CMD_FLASH_READ:
@@ -291,6 +293,11 @@ void AimeSerialWorker::requestLedColor(uint8_t r, uint8_t g, uint8_t b)
 {
     uint8_t payload[3] = { r, g, b };
     sendCommand(CMD_LED, payload, 3);
+}
+
+void AimeSerialWorker::requestLedBrightness(uint8_t value)
+{
+    sendCommand(CMD_LED_BRIGHT, &value, 1);
 }
 
 void AimeSerialWorker::requestWriteCard(uint8_t sector, uint8_t block,

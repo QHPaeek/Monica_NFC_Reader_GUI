@@ -50,6 +50,7 @@ public slots:
     void requestFlashRead();
     void requestFlashWrite(const FlashData &data);
     void requestLedColor(uint8_t r, uint8_t g, uint8_t b);
+    void requestLedBrightness(uint8_t value);
     void requestWriteCard(uint8_t sector, uint8_t block,
                           QByteArray keyA, QByteArray keyB, QByteArray data);
 

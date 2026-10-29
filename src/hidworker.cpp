@@ -191,6 +191,16 @@ void HIDWorker::requestLedColor(uint8_t r, uint8_t g, uint8_t b)
     writeReport(report);
 }
 
+/* 全局亮度 (0x63)。固件在数值变化时会写 Flash，所以不要频繁调用，
+ * 由界面上的「写入」按钮触发。
+ */
+void HIDWorker::requestLedBrightness(uint8_t value)
+{
+    uint8_t payload = value;
+    QByteArray report = buildOutputReport(CMD_LED_Brightness, &payload, 1);
+    writeReport(report);
+}
+
 void HIDWorker::requestJumpToDfu()
 {
     uint8_t payload = 0;

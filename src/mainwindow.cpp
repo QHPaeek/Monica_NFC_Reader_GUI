@@ -1053,10 +1053,18 @@ QWidget* MainWindow::createSystemTab()
     uartRow->addStretch();
     vbox->addWidget(grpUart);
 
-    /* LED Brightness */
-    QGroupBox *grpLed = new QGroupBox(QString::fromUtf8("LED 全局亮度"), w);
+    /* ================= LED ================= */
+    QGroupBox *grpLed = new QGroupBox(QString::fromUtf8("LED"), w);
     grpLed->setObjectName(QStringLiteral("sysGroup"));
-    QHBoxLayout *ledRow = new QHBoxLayout(grpLed);
+    QVBoxLayout *ledBox = new QVBoxLayout(grpLed);
+    ledBox->setSpacing(8);
+
+    /* ---- 全局亮度: 拖动不写, 点「写入设备」时随 Flash 一起保存 ---- */
+    QHBoxLayout *brightRow = new QHBoxLayout();
+    brightRow->setSpacing(10);
+
+    QLabel *lbBright = new QLabel(QString::fromUtf8("全局亮度"), grpLed);
+    lbBright->setMinimumWidth(56);
 
     m_sldLedBright = new QSlider(Qt::Horizontal, grpLed);
     m_sldLedBright->setObjectName(QStringLiteral("ledSlider"));
@@ -1066,24 +1074,69 @@ QWidget* MainWindow::createSystemTab()
 
     m_lblLedValue = new QLabel(QStringLiteral("0 / 255"), grpLed);
     m_lblLedValue->setObjectName(QStringLiteral("ledValue"));
-    m_lblLedValue->setFixedWidth(70);
+    m_lblLedValue->setFixedWidth(64);
     m_lblLedValue->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
 
     connect(m_sldLedBright, &QSlider::valueChanged, this, [this](int v) {
         m_lblLedValue->setText(QStringLiteral("%1 / 255").arg(v));
     });
-    connect(m_sldLedBright, &QSlider::valueChanged,
-            this, &MainWindow::onLedSliderChanged);
 
-    QLabel *ledHint = new QLabel(
-        QStringLiteral("0 = Off    |    128 = 50%    |    255 = Max"), grpLed);
-    ledHint->setObjectName(QStringLiteral("sysHint"));
+    brightRow->addWidget(lbBright);
+    brightRow->addWidget(m_sldLedBright, 1);
+    brightRow->addWidget(m_lblLedValue);
 
-    ledRow->addWidget(m_sldLedBright, 1);
-    ledRow->addSpacing(12);
-    ledRow->addWidget(m_lblLedValue);
+    QLabel *brightHint = new QLabel(
+        QString::fromUtf8("拖动不写入；点下方「写入设备」才保存到 Flash"), grpLed);
+    brightHint->setObjectName(QStringLiteral("sysHint"));
+    brightHint->setWordWrap(true);
+
+    /* ---- 实时 RGB: 每次拖动都发 0x60, 不保存 ---- */
+    QLabel *rgbTitle = new QLabel(QString::fromUtf8("实时亮度（不保存）"), grpLed);
+    rgbTitle->setObjectName(QStringLiteral("sysHint"));
+    rgbTitle->setStyleSheet(QStringLiteral("font-weight:600;"));
+
+    QGridLayout *rgbGrid = new QGridLayout();
+    rgbGrid->setHorizontalSpacing(10);
+    rgbGrid->setVerticalSpacing(6);
+
+    const char *rgbNames[3] = { "R", "G", "B" };
+    QSlider **rgbSliders[3] = { &m_sldLedR, &m_sldLedG, &m_sldLedB };
+    QLabel  **rgbLabels[3]  = { &m_lblLedR, &m_lblLedG, &m_lblLedB };
+
+    for (int i = 0; i < 3; ++i) {
+        QLabel *tag = new QLabel(QString::fromLatin1(rgbNames[i]), grpLed);
+        tag->setMinimumWidth(14);
+
+        QSlider *sld = new QSlider(Qt::Horizontal, grpLed);
+        sld->setRange(0, 255);
+        sld->setValue(0);
+
+        QLabel *val = new QLabel(QStringLiteral("0"), grpLed);
+        val->setObjectName(QStringLiteral("ledValue"));
+        val->setFixedWidth(42);
+        val->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+        *rgbSliders[i] = sld;
+        *rgbLabels[i]  = val;
+
+        /* 先设值再连接, 避免初始化时就发命令 */
+        connect(sld, &QSlider::valueChanged, this, [this, val](int v) {
+            val->setText(QString::number(v));
+            onLedSliderChanged(v);
+        });
+
+        rgbGrid->addWidget(tag, i, 0);
+        rgbGrid->addWidget(sld, i, 1);
+        rgbGrid->addWidget(val, i, 2);
+    }
+
+    ledBox->addLayout(brightRow);
+    ledBox->addWidget(brightHint);
+    ledBox->addSpacing(2);
+    ledBox->addWidget(rgbTitle);
+    ledBox->addLayout(rgbGrid);
+
     vbox->addWidget(grpLed);
-    vbox->addWidget(ledHint);
     vbox->addStretch();
 
     return w;
@@ -1584,6 +1637,12 @@ void MainWindow::onWriteSettings()
         QStringLiteral("正在写入设置..."),
         QStringLiteral("Writing settings to device...")));
     sendFlashWrite(data);
+
+    /* 固件的 0x71 只把参数写进 Flash, 不会立刻调整亮度;
+     * 补一条 0x63 让新亮度立即生效。此时 Flash 里的值已相同,
+     * 固件不会重复写 Flash。
+     */
+    sendLedBrightness(data.gobal_LED_setting);
 }
 
 void MainWindow::onResetDefaults()
@@ -1614,12 +1673,17 @@ void MainWindow::onResetDefaults()
         QStringLiteral("Settings reset to defaults (not yet written)")));
 }
 
-void MainWindow::onLedSliderChanged(int value)
+/* 实时 RGB: 三个滑条任意一个变化都整体重发 0x60 (不写 Flash) */
+void MainWindow::onLedSliderChanged(int)
 {
-    if (!m_connected) return;
-    uint8_t v = static_cast<uint8_t>(value);
-    sendLed(v);
+    if (!m_connected || !m_sldLedR || !m_sldLedG || !m_sldLedB)
+        return;
+
+    sendLedRgb(static_cast<uint8_t>(m_sldLedR->value()),
+               static_cast<uint8_t>(m_sldLedG->value()),
+               static_cast<uint8_t>(m_sldLedB->value()));
 }
+
 
 /* ---- 原始数据日志 ---- */
 
@@ -2914,8 +2978,7 @@ void MainWindow::applyLanguage()
                     gb->setTitle(trC(QString::fromUtf8("串口波特率"),
                                     QStringLiteral("UART Baudrate")));
                 else if (title.contains("LED") || title.contains(QString::fromUtf8("亮度")))
-                    gb->setTitle(trC(QString::fromUtf8("LED 全局亮度"),
-                                    QStringLiteral("Global LED Brightness")));
+                    gb->setTitle(QStringLiteral("LED"));
                 break;
             }
             p = p->parentWidget();
@@ -3024,12 +3087,20 @@ void MainWindow::sendFlashWrite(const FlashData &data)
         m_serial->requestFlashWrite(data);
 }
 
-void MainWindow::sendLed(uint8_t value)
+void MainWindow::sendLedRgb(uint8_t r, uint8_t g, uint8_t b)
 {
     if (m_transport == TransportHid)
-        m_hid->requestLedColor(value, value, value);
+        m_hid->requestLedColor(r, g, b);
     else if (m_transport == TransportSerial)
-        m_serial->requestLedColor(value, value, value);
+        m_serial->requestLedColor(r, g, b);
+}
+
+void MainWindow::sendLedBrightness(uint8_t value)
+{
+    if (m_transport == TransportHid)
+        m_hid->requestLedBrightness(value);
+    else if (m_transport == TransportSerial)
+        m_serial->requestLedBrightness(value);
 }
 
 void MainWindow::sendWriteCard(uint8_t sector, uint8_t block,

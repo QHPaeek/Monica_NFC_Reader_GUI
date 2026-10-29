@@ -180,7 +180,8 @@ private:
     void handleTransportConnected(const QString &desc, bool needFlashRead);
     void sendFlashRead();
     void sendFlashWrite(const FlashData &data);
-    void sendLed(uint8_t value);
+    void sendLedRgb(uint8_t r, uint8_t g, uint8_t b);
+    void sendLedBrightness(uint8_t value);
     void sendWriteCard(uint8_t sector, uint8_t block,
                        QByteArray keyA, QByteArray keyB, QByteArray data);
 
@@ -261,6 +262,12 @@ private:
     QComboBox  *m_cmbUartBaud;
     QSlider    *m_sldLedBright;
     QLabel     *m_lblLedValue;
+    QSlider    *m_sldLedR;
+    QSlider    *m_sldLedG;
+    QSlider    *m_sldLedB;
+    QLabel     *m_lblLedR;
+    QLabel     *m_lblLedG;
+    QLabel     *m_lblLedB;
 
     /* 按钮 */
     QPushButton *m_btnRead;
