@@ -1809,6 +1809,11 @@ void MainWindow::onEnterBootloader()
          * 否则 bootloader 的握手会因为端口被 AimeIO 连接占着而打不开。
          */
         m_serial->disconnectPort();
+
+        /* 关键: UART 下 bootloader 复用同一个端口号, 不会出现新的 VID/PID,
+         * 必须靠协议握手确认。漏了这一步就会一直等到 10 秒报失败。
+         */
+        scheduleSerialProbe(600);
         return;
     }
 
@@ -2002,15 +2007,8 @@ void MainWindow::pollEnterResult()
         if (m_enterDlg) {
             m_enterDlg->setIcon(QMessageBox::Critical);
             m_enterDlg->setText(m_enterMode == 1
-                ? trC(QString::fromUtf8(
-                          "进入 BOOTLOADER 失败。\n\n"
-                          "可能原因：固件尚未包含自研 BOOTLOADER、串口波特率不匹配、"
-                          "USB 线不支持数据，或设备已死机。\n"
-                          "可尝试拔插后重试，或确认 SYSTEM 里的 UART 波特率设置。"),
-                      QStringLiteral(
-                          "Failed to enter the bootloader.\n\n"
-                          "The firmware may lack the bootloader, the serial baud rate may not "
-                          "match, the cable may be charge-only, or the device may have hung."))
+                ? trC(QString::fromUtf8("进入 BOOTLOADER 失败。"),
+                      QStringLiteral("Failed to enter the bootloader."))
                 : trC(QString::fromUtf8(
                           "进入 DFU 失败。\n\n"
                           "请尝试手动进入 DFU：断电后按住 BOOT 键再上电。"),
