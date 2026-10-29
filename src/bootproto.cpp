@@ -1,6 +1,7 @@
 #include "bootproto.h"
 
 #include <QtSerialPort/QSerialPort>
+#include <QtSerialPort/QSerialPortInfo>
 #include <QtEndian>
 #include <QFile>
 #include <QFileInfo>
@@ -48,6 +49,59 @@ quint32 getU32(const char *p)
 }
 
 } // namespace
+
+/* --------------------------------------------------------------------
+ *  固件镜像形态判断
+ * -------------------------------------------------------------------- */
+
+namespace
+{
+
+/* 某个偏移处是否是一颗合理的 Cortex-M 向量表:
+ *   [0] = 初始 MSP, 必须落在 SRAM (0x2000xxxx)
+ *   [1] = Reset_Handler, 必须落在指定 Flash 区间内 (忽略 Thumb 位)
+ */
+bool vectorTableAt(const QByteArray &data, int offset,
+                   quint32 flashLo, quint32 flashHi)
+{
+    if (offset < 0 || data.size() < offset + 8)
+        return false;
+
+    const uchar *p = reinterpret_cast<const uchar *>(data.constData()) + offset;
+    const quint32 sp = qFromLittleEndian<quint32>(p);
+    const quint32 rv = qFromLittleEndian<quint32>(p + 4) & ~1u;
+
+    const bool spOk = ((sp & 0xFFF00000u) == 0x20000000u) && (sp > 0x20000000u);
+    const bool rvOk = (rv >= flashLo) && (rv < flashHi);
+    return spOk && rvOk;
+}
+
+} // namespace
+
+BootImageKind classifyFirmwareImage(const QString &path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return BootImageKind::Invalid;
+
+    const QByteArray head = f.read(static_cast<qint64>(BOOT_IMAGE_HEADER_SIZE) + 8);
+    f.close();
+
+    /* 0x6000 处必须是 APP 向量表 —— 这是"带 BOOTLOADER 头"的硬判据。
+     * 纯 APP 镜像在这里是代码中段, 不可能凑巧满足 SP/复位向量两个条件。
+     */
+    const bool appVecOk = vectorTableAt(head, static_cast<int>(BOOT_IMAGE_HEADER_SIZE),
+                                        BOOT_APP_BASE_ADDR, BOOT_FLASH_END_ADDR);
+    if (!appVecOk) {
+        /* 区分"合法但只有 APP"与"根本不是固件" */
+        const bool headVecOk = vectorTableAt(head, 0,
+                                             0x08000000u, BOOT_FLASH_END_ADDR);
+        return headVecOk ? BootImageKind::AppOnly : BootImageKind::Invalid;
+    }
+
+    /* 0x6000 处已经是合法 APP 向量表 → 判定为合并固件 */
+    return BootImageKind::Merged;
+}
 
 /* --------------------------------------------------------------------
  *  BootFlasher
@@ -238,9 +292,17 @@ bool BootFlasher::openPort(QSerialPort &port, const QString &name, QString *err)
     for (int i = 0; i < 10; ++i) {
         if (port.open(QIODevice::ReadWrite)) {
             port.clear(QSerialPort::AllDirections);
-            /* USB CDC 常要求 DTR 有效后才开始收发 */
-            port.setDataTerminalReady(true);
-            QThread::msleep(20);
+
+            /* 只对真正的 USB CDC 拉高 DTR。
+             * UART 转接板的 DTR 常被接到 RST, 乱拉会把板子按在复位上。
+             */
+            const QSerialPortInfo info(name);
+            if (info.hasVendorIdentifier() && info.hasProductIdentifier()
+                && info.vendorIdentifier() == 0xAFF1
+                && info.productIdentifier() == 0x52B2) {
+                port.setDataTerminalReady(true);
+                QThread::msleep(20);
+            }
             return true;
         }
         last = port.errorString();
@@ -372,6 +434,18 @@ void BootFlasher::flash(const QString &portName, const QString &imagePath,
 
     const int rawSize = image.size();
     if (skipBootHeader) {
+        /* 硬性要求: 只有「BOOTLOADER + APP」合并固件才能走 BOOT 通道。
+         * 纯 APP 镜像(老固件)在 0x6000 处不是向量表, 跳过 24 KiB 会直接刷坏。
+         */
+        const BootImageKind kind = classifyFirmwareImage(imagePath);
+        if (kind != BootImageKind::Merged) {
+            fail(kind == BootImageKind::AppOnly
+                ? QStringLiteral("该固件不带 BOOTLOADER 头（0x6000 处不是合法的 APP 向量表），"
+                                 "不能通过 BOOT 通道烧录。请改用 DFU 方式。")
+                : QStringLiteral("文件不是有效的固件镜像（向量表不合法），已中止。"));
+            return;
+        }
+
         if (rawSize <= static_cast<int>(BOOT_IMAGE_HEADER_SIZE)) {
             fail(QStringLiteral("文件只有 %1 字节, 比 BOOTLOADER 头还小, "
                                 "没有可烧录的 APP 区").arg(rawSize));
@@ -422,11 +496,14 @@ void BootFlasher::flash(const QString &portName, const QString &imagePath,
         return;
     }
 
-    if (skipBootHeader && hello.appBase != BOOT_IMAGE_HEADER_SIZE) {
-        emit logLine(QStringLiteral(
-            "⚠ 设备报告 APP 基址 0x%1, 与预期的 0x%2 不一致, 请确认固件是否匹配")
+    /* 设备报告的 APP 基址必须与合并固件的布局一致, 否则跳过 0x6000 就是错的 */
+    if (skipBootHeader && hello.appBase != BOOT_APP_BASE_ADDR) {
+        fail(QStringLiteral(
+            "设备报告的 APP 基址是 0x%1，与预期的 0x%2 不一致，"
+            "说明该设备的 Flash 布局与合并固件不匹配，已中止。")
             .arg(hello.appBase, 8, 16, QLatin1Char('0'))
-            .arg(static_cast<uint>(BOOT_IMAGE_HEADER_SIZE), 8, 16, QLatin1Char('0')));
+            .arg(static_cast<uint>(BOOT_APP_BASE_ADDR), 8, 16, QLatin1Char('0')));
+        return;
     }
 
     /* --- 对齐与分块 --- */

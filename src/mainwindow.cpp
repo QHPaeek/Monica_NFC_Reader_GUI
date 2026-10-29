@@ -19,36 +19,6 @@
 /* AIC 解密 / 卡号转换 — 来自固件 accesscode.h */
 #include "accesscode.h"
 
-/* 粗查 0x6000 处是否像一颗合法 Cortex-M 向量表：
- * 初值 SP 落在 SRAM (0x2000xxxx)，复位向量落在 Flash (0x0800xxxx)。
- * 用来在烧录前识别"合并固件 / 纯 APP 镜像"选错的情况。
- */
-static bool looksLikeMergedImage(const QString &path)
-{
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly))
-        return false;
-    if (f.size() < static_cast<qint64>(BOOT_IMAGE_HEADER_SIZE) + 8)
-        return false;
-
-    if (!f.seek(static_cast<qint64>(BOOT_IMAGE_HEADER_SIZE)))
-        return false;
-
-    const QByteArray v = f.read(8);
-    f.close();
-    if (v.size() < 8)
-        return false;
-
-    const quint32 sp = qFromLittleEndian<quint32>(
-        reinterpret_cast<const uchar *>(v.constData()));
-    const quint32 rv = qFromLittleEndian<quint32>(
-        reinterpret_cast<const uchar *>(v.constData()) + 4);
-
-    const bool spOk = (sp & 0x2FFE0000u) == 0x20000000u;
-    const bool rvOk = (rv & 0xFF000000u) == 0x08000000u;
-    return spOk && rvOk;
-}
-
 static QString formatCardNumber(const QString &hex)
 {
     QString fmt;
@@ -1986,6 +1956,31 @@ void MainWindow::onBootBrowse()
     if (path.isEmpty())
         return;
 
+    /* BOOT 通道只接受「BOOTLOADER + APP」合并固件。
+     * 纯 APP 镜像(0x6000 处不是向量表)一律拒绝, 让它去 DFU 通道。
+     */
+    const BootImageKind kind = classifyFirmwareImage(path);
+    if (kind != BootImageKind::Merged) {
+        QMessageBox::warning(this,
+            trC(QString::fromUtf8("固件不能走 BOOT"),
+                QStringLiteral("Not a Bootloader Image")),
+            kind == BootImageKind::AppOnly
+                ? trC(QString::fromUtf8(
+                          "该文件是纯 APP 镜像（偏移 0x6000 处不是合法的 APP 向量表），"
+                          "不带 BOOTLOADER 头。\n\n"
+                          "BOOT 通道只能烧录「BOOTLOADER + APP」的合并固件。\n"
+                          "请改用下方 DFU 通道烧录该文件。"),
+                      QStringLiteral(
+                          "This is a plain application image with no bootloader header.\n\n"
+                          "The BOOT channel only accepts merged bootloader+app images.\n"
+                          "Use the DFU channel below to flash this file."))
+                : trC(QString::fromUtf8(
+                          "该文件不是有效的固件镜像（向量表不合法），已拒绝。"),
+                      QStringLiteral(
+                          "This file is not a valid firmware image (bad vector table).")));
+        return;
+    }
+
     m_bootFilePath = path;
     m_bootFileEdit->setText(path);
     updateFirmwareEntryState();
@@ -2019,24 +2014,23 @@ void MainWindow::onBootFlash()
             return;
     }
 
-    /* 安全检查: 0x6000 处应是一颗合法向量表 (合并固件) */
-    if (!looksLikeMergedImage(m_bootFilePath)) {
-        auto r = QMessageBox::warning(this,
-            trC(QString::fromUtf8("固件格式可疑"),
-                QStringLiteral("Suspicious Firmware")),
-            trC(QString::fromUtf8(
-                    "文件在偏移 0x6000 处不像合法的 APP 向量表。\n\n"
-                    "这通常意味着它不是「BOOTLOADER + APP」的合并固件，"
-                    "而是纯 APP 镜像。继续烧录会跳过前 24 KiB，"
-                    "可能导致设备无法启动。\n\n仍要继续吗？"),
-                QStringLiteral(
-                    "The data at offset 0x6000 does not look like a valid application "
-                    "vector table.\n\nThis usually means the file is a plain application "
-                    "image, not a merged bootloader+app image. Continuing would skip the "
-                    "first 24 KiB and may brick the device.\n\nContinue anyway?")),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-        if (r != QMessageBox::Yes)
-            return;
+    /* 硬性检查: 没有 BOOTLOADER 头的固件不能走 BOOT 通道 */
+    const BootImageKind kind = classifyFirmwareImage(m_bootFilePath);
+    if (kind != BootImageKind::Merged) {
+        QMessageBox::critical(this,
+            trC(QString::fromUtf8("固件不能走 BOOT"),
+                QStringLiteral("Not a Bootloader Image")),
+            kind == BootImageKind::AppOnly
+                ? trC(QString::fromUtf8(
+                          "该固件不带 BOOTLOADER 头，不能通过 BOOT 通道烧录。\n\n"
+                          "请改用 DFU 通道烧录（DFU 可以刷任何版本）。"),
+                      QStringLiteral(
+                          "This firmware has no bootloader header and cannot be flashed "
+                          "over BOOT.\n\nUse the DFU channel instead — DFU accepts any version."))
+                : trC(QString::fromUtf8(
+                          "该文件不是有效的固件镜像，已中止。"),
+                      QStringLiteral("Not a valid firmware image — aborted.")));
+        return;
     }
 
     m_bootBusy = true;

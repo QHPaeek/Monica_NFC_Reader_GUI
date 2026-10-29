@@ -28,6 +28,25 @@
 
 /* 合并固件中 BOOTLOADER 占用的头部长度 (APP 从 0x08006000 开始) */
 #define BOOT_IMAGE_HEADER_SIZE  0x6000u
+#define BOOT_APP_BASE_ADDR      (0x08000000u + BOOT_IMAGE_HEADER_SIZE)
+#define BOOT_FLASH_END_ADDR     0x08020000u   /* STM32F072CB: 128 KiB */
+
+/* 固件镜像形态 —— 决定能不能走 BOOT 通道
+ *
+ *   Merged   0x0000 是 bootloader 向量表, 0x6000 是 APP 向量表
+ *            (v0.8 起的合并固件, 可走 BOOT)
+ *   AppOnly  只有 0x0000 处一颗 APP 向量表, 0x6000 处不是向量表
+ *            (v0.7 及以下的老固件 / 纯 APP 镜像, 只能走 DFU)
+ *   Invalid  文件过小或向量表不合法
+ */
+enum class BootImageKind {
+    Invalid,
+    Merged,
+    AppOnly,
+};
+
+/* 读取文件头并判断镜像形态 (只读前 0x6008 字节, 很快) */
+BootImageKind classifyFirmwareImage(const QString &path);
 
 enum BootOp : quint16 {
     BOOT_OP_HELLO           = 0x0001,
