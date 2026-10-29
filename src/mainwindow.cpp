@@ -592,7 +592,7 @@ QWidget* MainWindow::buildFirmwarePage()
 
     /* ================= DFU 区 ================= */
     QGroupBox *dfuBox = new QGroupBox(
-        QString::fromUtf8("DFU 升级  ·  固件 v0.7 及以下"), w);
+        QString::fromUtf8("DFU 升级  ·  任何版本均可"), w);
     QVBoxLayout *dfuLay = new QVBoxLayout(dfuBox);
     dfuLay->setSpacing(8);
 
@@ -2402,6 +2402,13 @@ void MainWindow::onBootFlashFinished(bool ok, const QString &error)
     m_bootBusy = false;
 
     if (ok) {
+        /* 烧录成功说明这个串口上确实是 bootloader, 记下来,
+         * 否则状态区会显示"未检测到 BOOTLOADER"、重启按钮也被禁用。
+         */
+        const QString port = selectedSerialPort();
+        if (!port.isEmpty())
+            m_bootVerifiedPort = port;
+
         m_bootProgress->setValue(100);
         m_bootProgress->setFormat(QString::fromUtf8("100%  烧录完成"));
         refreshPortCombo();
