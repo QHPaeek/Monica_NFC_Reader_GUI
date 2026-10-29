@@ -84,6 +84,8 @@ struct BootDeviceInfo {
     quint32 boardId         = 0;
     quint32 flashLayoutId   = 0;
     quint32 appBase         = 0;
+    quint32 metadataBase    = 0;   /* metadata 起始地址, APP slot 到此为止 */
+    quint32 metadataSize    = 0;
     quint32 writeSize       = 0;
     quint32 maxChunkSize    = 0;
 };

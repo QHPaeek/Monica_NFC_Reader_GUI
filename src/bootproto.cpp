@@ -355,7 +355,9 @@ bool BootFlasher::handshake(QSerialPort &port, BootHello *hello,
         info->flashLayoutId   = getU32(rsp.constData() + 16);
         /* +20 flash_base, +24 flash_size */
         info->appBase         = getU32(rsp.constData() + 28);
-        /* +32 metadata_base, +36 metadata_size, +40 erase_size */
+        info->metadataBase    = getU32(rsp.constData() + 32);
+        info->metadataSize    = getU32(rsp.constData() + 36);
+        /* +40 erase_size */
         info->writeSize       = getU32(rsp.constData() + 44);
         info->maxChunkSize    = getU32(rsp.constData() + 48);
     }
@@ -424,15 +426,15 @@ void BootFlasher::flash(const QString &portName, const QString &imagePath,
         fail(QStringLiteral("无法打开固件文件: %1").arg(imagePath));
         return;
     }
-    QByteArray image = file.readAll();
+    const QByteArray raw = file.readAll();
     file.close();
 
-    if (image.isEmpty()) {
+    if (raw.isEmpty()) {
         fail(QStringLiteral("固件文件为空"));
         return;
     }
 
-    const int rawSize = image.size();
+    const int rawSize = raw.size();
     if (skipBootHeader) {
         /* 硬性要求: 只有「BOOTLOADER + APP」合并固件才能走 BOOT 通道。
          * 纯 APP 镜像(老固件)在 0x6000 处不是向量表, 跳过 24 KiB 会直接刷坏。
@@ -451,16 +453,7 @@ void BootFlasher::flash(const QString &portName, const QString &imagePath,
                                 "没有可烧录的 APP 区").arg(rawSize));
             return;
         }
-        image.remove(0, static_cast<int>(BOOT_IMAGE_HEADER_SIZE));
     }
-
-    emit logLine(QStringLiteral("固件: %1  (%2 字节%3)")
-        .arg(QFileInfo(imagePath).fileName())
-        .arg(rawSize)
-        .arg(skipBootHeader
-             ? QStringLiteral(", 已跳过前 0x6000 字节 BOOTLOADER 头 → APP %1 字节")
-                   .arg(image.size())
-             : QStringLiteral(", 按纯 APP 镜像整包烧录")));
 
     /* --- 打开串口 + 握手 --- */
     QString err;
@@ -484,9 +477,11 @@ void BootFlasher::flash(const QString &portName, const QString &imagePath,
         .arg(hello.appBase, 8, 16, QLatin1Char('0'))
         .arg(hello.slotSize).arg(hello.maxChunkSize));
     emit logLine(QStringLiteral(
-        "DEVICE_INFO ok: board 0x%1, layout 0x%2, 写对齐 %3")
+        "DEVICE_INFO ok: board 0x%1, layout 0x%2, metadata 0x%3+%4, 写对齐 %5")
         .arg(info.boardId, 8, 16, QLatin1Char('0'))
         .arg(info.flashLayoutId, 8, 16, QLatin1Char('0'))
+        .arg(info.metadataBase, 8, 16, QLatin1Char('0'))
+        .arg(info.metadataSize)
         .arg(info.writeSize));
 
     if (hello.protocolVersion != BOOT_PROTOCOL_VERSION) {
@@ -506,7 +501,73 @@ void BootFlasher::flash(const QString &portName, const QString &imagePath,
         return;
     }
 
-    /* --- 对齐与分块 --- */
+    /* --- 组装要写入的镜像 --- */
+    QByteArray image;
+    if (skipBootHeader) {
+        image = raw.mid(static_cast<int>(BOOT_IMAGE_HEADER_SIZE));
+
+        /* 合并固件在 APP 区之后还有一块 metadata (F072: 0x0801F800, 368 字节)。
+         * 那是 bootloader 的持久化信息, COMMIT 时它自己会写,
+         * 绝不能当数据发过去 —— 否则会超出 APP slot。
+         */
+        if (info.metadataBase > hello.appBase) {
+            const int slotLen = static_cast<int>(info.metadataBase - hello.appBase);
+            if (image.size() > slotLen) {
+                image.truncate(slotLen);
+                emit logLine(QStringLiteral(
+                    "已裁掉 slot 之外的尾部数据: APP slot = 0x%1..0x%2 (%3 字节)")
+                    .arg(hello.appBase, 8, 16, QLatin1Char('0'))
+                    .arg(info.metadataBase, 8, 16, QLatin1Char('0'))
+                    .arg(slotLen));
+            }
+
+            /* 文件尾部若确实带 metadata, 用它的 image_size 精确截断,
+             * 省掉大片 0xFF 填充的无效写入。
+             */
+            const qint64 mdOffset = static_cast<qint64>(info.metadataBase)
+                                    - 0x08000000LL;
+            if (info.metadataSize >= 64
+                && mdOffset >= 0
+                && mdOffset + 64 <= raw.size()) {
+                const uchar *m = reinterpret_cast<const uchar *>(raw.constData())
+                                 + mdOffset;
+                const quint32 magic   = qFromLittleEndian<quint32>(m);
+                const quint32 imgSize = qFromLittleEndian<quint32>(m + 20);
+                const quint32 imgCrc  = qFromLittleEndian<quint32>(m + 24);
+
+                if (magic == 0x4D544641u
+                    && imgSize > 0
+                    && imgSize <= static_cast<quint32>(image.size())) {
+                    image.truncate(static_cast<int>(imgSize));
+                    emit logLine(QStringLiteral(
+                        "按 metadata 定长: APP %1 字节, 声明 CRC32 0x%2")
+                        .arg(imgSize)
+                        .arg(imgCrc, 8, 16, QLatin1Char('0')));
+
+                    const quint32 realCrc = crc32(image);
+                    if (realCrc != imgCrc) {
+                        emit logLine(QStringLiteral(
+                            "⚠ metadata 声明的 CRC32 与实际不符 (实际 0x%1)，"
+                            "仍以实际数据为准")
+                            .arg(realCrc, 8, 16, QLatin1Char('0')));
+                    }
+                }
+            }
+        }
+
+        emit logLine(QStringLiteral(
+            "固件: %1 (%2 字节) → 跳过 0x6000 BOOTLOADER 头, 发送 APP %3 字节")
+            .arg(QFileInfo(imagePath).fileName())
+            .arg(rawSize)
+            .arg(image.size()));
+    } else {
+        image = raw;
+        emit logLine(QStringLiteral("固件: %1 (%2 字节) → 整包烧录到 0x08000000")
+            .arg(QFileInfo(imagePath).fileName())
+            .arg(rawSize));
+    }
+
+    /* --- 对齐 --- */
     const int align = info.writeSize > 0 ? static_cast<int>(info.writeSize) : 2;
     const int rem = image.size() % align;
     if (rem != 0)
