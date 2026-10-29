@@ -153,6 +153,8 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::onRebootFinished);
     connect(m_bootFlasher, &BootFlasher::probeFinished,
             this, &MainWindow::onProbeFinished);
+    connect(m_bootFlasher, &BootFlasher::serialJumpSent,
+            this, &MainWindow::onSerialJumpSent);
 
     m_bootThread->start();
 }
@@ -528,6 +530,21 @@ QWidget* MainWindow::buildFirmwarePage()
     bootLay->addWidget(m_bootProgress);
     bootLay->addWidget(m_bootFlashBtn);
 
+    /* 重启读卡器属于 BOOTLOADER 区:
+     * 烧录完成后设备仍停在 bootloader, 用 BOOT_APP 跳回应用。 */
+    m_rebootBtn = new QPushButton(QString::fromUtf8("重启读卡器"), bootBox);
+    m_rebootBtn->setObjectName(QStringLiteral("btnSecondary"));
+    m_rebootBtn->setEnabled(false);
+    m_rebootBtn->setToolTip(QString::fromUtf8(
+        "通过 BOOTLOADER 的 BOOT_APP 命令跳回应用固件"));
+    connect(m_rebootBtn, &QPushButton::clicked,
+            this, &MainWindow::onRebootReader);
+
+    QHBoxLayout *rebootRow = new QHBoxLayout();
+    rebootRow->addStretch();
+    rebootRow->addWidget(m_rebootBtn);
+    bootLay->addLayout(rebootRow);
+
     /* ================= DFU 区 ================= */
     QGroupBox *dfuBox = new QGroupBox(
         QString::fromUtf8("DFU 升级  ·  固件 v0.7 及以下"), w);
@@ -583,7 +600,7 @@ QWidget* MainWindow::buildFirmwarePage()
     dfuLay->addWidget(m_dfuDownloadBtn);
     dfuLay->addWidget(m_dfuFlashBtn);
 
-    /* ================= 共用日志 + 重启 ================= */
+    /* ================= 共用日志 ================= */
     m_dfuLog = new QPlainTextEdit(w);
     m_dfuLog->setObjectName(QStringLiteral("dfuLog"));
     m_dfuLog->setReadOnly(true);
@@ -592,24 +609,21 @@ QWidget* MainWindow::buildFirmwarePage()
         QStringLiteral("QPlainTextEdit { background:#1E1E2E; color:#CCCCCC; "
                        "font-family:Consolas,monospace; font-size:12px; }"));
 
-    m_rebootBtn = new QPushButton(QString::fromUtf8("重启读卡器"), w);
-    m_rebootBtn->setObjectName(QStringLiteral("btnSecondary"));
-    m_rebootBtn->setEnabled(false);
-    m_rebootBtn->setToolTip(QString::fromUtf8(
-        "通过 BOOTLOADER 的 BOOT_APP 命令跳回应用固件"));
-    connect(m_rebootBtn, &QPushButton::clicked,
-            this, &MainWindow::onRebootReader);
+    /* 两区之间的分界线 */
+    QFrame *separator = new QFrame(w);
+    separator->setObjectName(QStringLiteral("fwSeparator"));
+    separator->setFrameShape(QFrame::HLine);
+    separator->setFrameShadow(QFrame::Plain);
+    separator->setFixedHeight(1);
+    separator->setStyleSheet(
+        QStringLiteral("QFrame#fwSeparator { background:#C8C8D0; border:none; }"));
 
     vbox->addWidget(title);
     vbox->addWidget(desc);
     vbox->addWidget(bootBox);
+    vbox->addWidget(separator);
     vbox->addWidget(dfuBox);
     vbox->addWidget(m_dfuLog, 1);
-
-    QHBoxLayout *bottomRow = new QHBoxLayout();
-    bottomRow->addStretch();
-    bottomRow->addWidget(m_rebootBtn);
-    vbox->addLayout(bottomRow);
 
     /* ---- QProcess / 网络 ---- */
     m_dfuProcess = new QProcess(this);
@@ -1635,18 +1649,47 @@ void MainWindow::onEnterBootloader()
         return;
     }
 
+    /* ---------- 情况 A: HID 未连接 → 走串口发 AimeIO JUMP2BOOT ---------- */
     if (!m_connected) {
-        QMessageBox::warning(this,
-            trC(QString::fromUtf8("未连接"),
-                QStringLiteral("Not Connected")),
-            trC(QString::fromUtf8(
-                    "读卡器未连接，无法发送进入 BOOTLOADER 的命令。\n\n"
-                    "如果设备已刷死，可手动选择串口后直接点「开始升级」。"),
-                QStringLiteral(
-                    "The reader is not connected, so the jump command cannot be sent.\n\n"
-                    "If the device is bricked, pick a port manually and click Start.")));
+        const QString port = m_bootPortCombo
+            ? m_bootPortCombo->currentData().toString()
+            : QString();
+
+        if (port.isEmpty()) {
+            QMessageBox::warning(this,
+                trC(QString::fromUtf8("请选择串口"),
+                    QStringLiteral("Select a Port")),
+                trC(QString::fromUtf8(
+                        "HID 未连接。\n\n"
+                        "请先在「进入 BOOTLOADER」右侧的下拉框中选择读卡器所在的串口"
+                        "（UART 转接板或 CDC），再点一次「进入 BOOTLOADER」。"),
+                    QStringLiteral(
+                        "HID is not connected.\n\n"
+                        "Pick the reader's serial port in the drop-down next to "
+                        "\"Enter Bootloader\" first, then click it again.")));
+            return;
+        }
+
+        showEnterDialog(1, trC(
+            QString::fromUtf8("正在通过串口尝试进入 BOOTLOADER…\n（%1）").arg(port),
+            QStringLiteral("Trying to enter the bootloader over %1...").arg(port)));
+
+        m_lblStatusMsg->setText(trC(
+            QString::fromUtf8("正在通过 %1 发送 JUMP2BOOT…").arg(port),
+            QStringLiteral("Sending JUMP2BOOT over %1...").arg(port)));
+
+        m_dfuLog->appendPlainText(trC(
+            QString::fromUtf8("HID 未连接，改用串口发送 AimeIO JUMP2BOOT"),
+            QStringLiteral("HID not connected — sending AimeIO JUMP2BOOT over serial")));
+
+        QMetaObject::invokeMethod(m_bootFlasher, "sendAimeJumpToBoot",
+                                  Qt::QueuedConnection,
+                                  Q_ARG(QString, port),
+                                  Q_ARG(int, configuredBaud()));
         return;
     }
+
+    /* ---------- 情况 B: HID 已连接 → 走 0x62 HID 命令 ---------- */
 
     /* v0.7 及以下没有 0x62 命令, 提前告知, 别让用户白等 10 秒 */
     if (m_fwVersion != 0 && m_fwVersion < 0x08) {
@@ -1668,30 +1711,74 @@ void MainWindow::onEnterBootloader()
         }
     }
 
-    /* 弹窗: 正在尝试进入 */
-    m_enterMode       = 1;
-    m_enterWaitedMs   = 0;
-    m_enterNotified   = false;
-
-    if (m_enterDlg) {
-        m_enterDlg->close();
-        m_enterDlg->deleteLater();
-    }
-    m_enterDlg = new QMessageBox(QMessageBox::Information,
-        trC(QString::fromUtf8("固件升级"), QStringLiteral("Firmware Upgrade")),
-        trC(QString::fromUtf8("正在尝试进入 BOOTLOADER…"),
-            QStringLiteral("Trying to enter the bootloader…")),
-        QMessageBox::NoButton, this);
-    m_enterDlg->setWindowModality(Qt::WindowModal);
-    m_enterDlg->show();
-
-    m_enterTimer->start();
+    showEnterDialog(1, trC(
+        QString::fromUtf8("正在尝试进入 BOOTLOADER…"),
+        QStringLiteral("Trying to enter the bootloader...")));
 
     m_lblStatusMsg->setText(trC(
         QString::fromUtf8("正在尝试进入 BOOTLOADER…"),
         QStringLiteral("Trying to enter the bootloader...")));
 
     m_hid->requestJumpToBoot();
+}
+
+/* 建立「正在尝试进入…」弹窗并启动轮询 */
+void MainWindow::showEnterDialog(int mode, const QString &text)
+{
+    m_enterMode     = mode;
+    m_enterWaitedMs = 0;
+    m_enterNotified = false;
+
+    if (m_enterDlg) {
+        m_enterDlg->close();
+        m_enterDlg->deleteLater();
+    }
+
+    m_enterDlg = new QMessageBox(QMessageBox::Information,
+        trC(QString::fromUtf8("固件升级"), QStringLiteral("Firmware Upgrade")),
+        text,
+        QMessageBox::NoButton, this);
+    m_enterDlg->setWindowModality(Qt::WindowModal);
+    m_enterDlg->show();
+
+    /* 等待期间锁住升级区, 避免重复触发 */
+    m_bootBusy = true;
+    updateFirmwareEntryState();
+
+    m_enterTimer->start();
+}
+
+/* 确认已进入 BOOT/DFU 后的统一收尾 */
+void MainWindow::finishEnterSuccess()
+{
+    const int mode = m_enterMode;
+
+    m_enterTimer->stop();
+    m_enterMode = 0;
+    m_bootBusy  = false;
+
+    refreshPortCombo();
+    updateFirmwareEntryState();
+
+    if (m_enterDlg) {
+        m_enterDlg->setIcon(QMessageBox::Information);
+        m_enterDlg->setText(mode == 1
+            ? trC(QString::fromUtf8(
+                      "已成功进入 BOOTLOADER。\n现在可以选择固件文件并开始升级。"),
+                  QStringLiteral(
+                      "Entered the bootloader successfully.\nSelect a firmware file to upgrade."))
+            : trC(QString::fromUtf8(
+                      "已成功进入 DFU 模式。\n现在可以选择固件文件并烧录。"),
+                  QStringLiteral(
+                      "Entered DFU mode successfully.\nSelect a firmware file to flash.")));
+        m_enterDlg->setStandardButtons(QMessageBox::Ok);
+    }
+
+    m_lblStatusMsg->setText(mode == 1
+        ? trC(QString::fromUtf8("已进入 BOOTLOADER，可以开始升级"),
+              QStringLiteral("In bootloader — ready to upgrade"))
+        : trC(QString::fromUtf8("已进入 DFU，可以开始烧录"),
+              QStringLiteral("In DFU — ready to flash")));
 }
 
 void MainWindow::onEnterDfu()
@@ -1722,23 +1809,9 @@ void MainWindow::onEnterDfu()
         return;
     }
 
-    m_enterMode     = 2;
-    m_enterWaitedMs = 0;
-    m_enterNotified = false;
-
-    if (m_enterDlg) {
-        m_enterDlg->close();
-        m_enterDlg->deleteLater();
-    }
-    m_enterDlg = new QMessageBox(QMessageBox::Information,
-        trC(QString::fromUtf8("固件升级"), QStringLiteral("Firmware Upgrade")),
-        trC(QString::fromUtf8("正在尝试进入 DFU 模式…"),
-            QStringLiteral("Trying to enter DFU mode…")),
-        QMessageBox::NoButton, this);
-    m_enterDlg->setWindowModality(Qt::WindowModal);
-    m_enterDlg->show();
-
-    m_enterTimer->start();
+    showEnterDialog(2, trC(
+        QString::fromUtf8("正在尝试进入 DFU 模式…"),
+        QStringLiteral("Trying to enter DFU mode…")));
 
     m_lblStatusMsg->setText(trC(
         QString::fromUtf8("正在尝试进入 DFU 模式…"),
@@ -1762,31 +1835,7 @@ void MainWindow::pollEnterResult()
                                        : dfuDevicePresent();
 
     if (ok) {
-        m_enterTimer->stop();
-        refreshPortCombo();
-        updateFirmwareEntryState();
-
-        if (m_enterDlg) {
-            m_enterDlg->setIcon(QMessageBox::Information);
-            m_enterDlg->setText(m_enterMode == 1
-                ? trC(QString::fromUtf8(
-                          "已成功进入 BOOTLOADER。\n现在可以选择固件文件并开始升级。"),
-                      QStringLiteral(
-                          "Entered the bootloader successfully.\nSelect a firmware file to upgrade."))
-                : trC(QString::fromUtf8(
-                          "已成功进入 DFU 模式。\n现在可以选择固件文件并烧录。"),
-                      QStringLiteral(
-                          "Entered DFU mode successfully.\nSelect a firmware file to flash.")));
-            m_enterDlg->setStandardButtons(QMessageBox::Ok);
-        }
-
-        m_lblStatusMsg->setText(m_enterMode == 1
-            ? trC(QString::fromUtf8("已进入 BOOTLOADER，可以开始升级"),
-                  QStringLiteral("In bootloader — ready to upgrade"))
-            : trC(QString::fromUtf8("已进入 DFU，可以开始烧录"),
-                  QStringLiteral("In DFU — ready to flash")));
-
-        m_enterMode = 0;
+        finishEnterSuccess();
         return;
     }
 
@@ -1818,12 +1867,13 @@ void MainWindow::pollEnterResult()
             m_enterDlg->setText(m_enterMode == 1
                 ? trC(QString::fromUtf8(
                           "进入 BOOTLOADER 失败。\n\n"
-                          "可能原因：固件尚未包含自研 BOOTLOADER、USB 线不支持数据、"
-                          "或设备已死机。\n可尝试拔插 USB 后重试。"),
+                          "可能原因：固件尚未包含自研 BOOTLOADER、串口波特率不匹配、"
+                          "USB 线不支持数据，或设备已死机。\n"
+                          "可尝试拔插后重试，或确认 SYSTEM 里的 UART 波特率设置。"),
                       QStringLiteral(
                           "Failed to enter the bootloader.\n\n"
-                          "The firmware may lack the bootloader, the cable may be charge-only, "
-                          "or the device may have hung.\nTry re-plugging the USB cable."))
+                          "The firmware may lack the bootloader, the serial baud rate may not "
+                          "match, the cable may be charge-only, or the device may have hung."))
                 : trC(QString::fromUtf8(
                           "进入 DFU 失败。\n\n"
                           "请尝试手动进入 DFU：断电后按住 BOOT 键再上电。"),
@@ -1838,6 +1888,8 @@ void MainWindow::pollEnterResult()
             QStringLiteral("Failed to enter upgrade mode")));
 
         m_enterMode = 0;
+        m_bootBusy  = false;
+        updateFirmwareEntryState();
     }
 }
 
@@ -1942,6 +1994,22 @@ bool MainWindow::dfuDevicePresent() const
      * 也兼容 ST 官方驱动的 0483:DF11 */
     return PortScan::isUsbPresent(BOOT_USB_VID, BOOT_USB_PID_DFU)
         || PortScan::isUsbPresent(0x0483, 0xDF11);
+}
+
+/* HID 未连接时, 串口发 JUMP2BOOT 该用哪个波特率。
+ * 没读过 Flash 就返回 0, 由 worker 依次尝试 115200/38400/9600。
+ */
+int MainWindow::configuredBaud() const
+{
+    if (m_fwVersion == 0)
+        return 0;
+
+    switch (m_flashData.system_setting) {
+    case 0x00: return 115200;
+    case 0x01: return 38400;
+    case 0x02: return 9600;
+    default:   return 0;
+    }
 }
 
 /* ---- BOOTLOADER 烧录 ---- */
@@ -2158,6 +2226,60 @@ void MainWindow::onProbeFinished(bool ok, const QString &summary)
               QStringLiteral("[probe] bootloader confirmed — %1").arg(summary))
         : trC(QString::fromUtf8("[探测] 该串口不是 BOOTLOADER — %1").arg(summary),
               QStringLiteral("[probe] not a bootloader — %1").arg(summary)));
+
+    /* UART 方式下 bootloader 复位后仍挂在同一个串口(端口号不变),
+     * 不会出现新的 VID/PID 端口, 只能靠协议握手确认已进入。
+     * USB CDC 方式下端口会重新枚举, 由 pollEnterResult 负责。
+     */
+    if (ok && m_enterMode == 1)
+        finishEnterSuccess();
+}
+
+/* ---- 串口发送 JUMP2BOOT 的结果 ---- */
+
+void MainWindow::onSerialJumpSent(bool ok, const QString &error)
+{
+    if (!ok) {
+        if (m_dfuLog) {
+            m_dfuLog->appendPlainText(trC(
+                QString::fromUtf8("[串口] JUMP2BOOT 未得到应答：%1").arg(error),
+                QStringLiteral("[serial] no answer to JUMP2BOOT: %1").arg(error)));
+        }
+
+        /* 不立刻判死: 命令可能已经送达, 只是没回包。
+         * 轮询会继续等到 10 秒, 期间也可能完成跳转。
+         */
+        if (m_enterDlg && m_enterMode == 1) {
+            m_enterDlg->setIcon(QMessageBox::Warning);
+            m_enterDlg->setText(trC(
+                QString::fromUtf8(
+                    "串口发送未得到应答（%1）。\n\n"
+                    "仍会继续等待设备切换（最多 10 秒）…").arg(error),
+                QStringLiteral(
+                    "No answer on the serial port (%1).\n\n"
+                    "Still waiting for the device to switch (up to 10 s)...").arg(error)));
+        }
+        return;
+    }
+
+    if (m_dfuLog) {
+        m_dfuLog->appendPlainText(trC(
+            QString::fromUtf8("[串口] JUMP2BOOT 已被接受，等待设备切换…"),
+            QStringLiteral("[serial] JUMP2BOOT accepted, waiting for the device to switch...")));
+    }
+
+    /* UART 方式端口号不变, 稍等片刻后直接握手指令确认;
+     * USB CDC 方式下端口会消失, probe 失败也无妨, 轮询会看到新端口。
+     */
+    QTimer::singleShot(600, this, [this]() {
+        if (m_enterMode != 1 || !m_bootPortCombo)
+            return;
+        const QString port = m_bootPortCombo->currentData().toString();
+        if (port.isEmpty())
+            return;
+        QMetaObject::invokeMethod(m_bootFlasher, "probe",
+                                  Qt::QueuedConnection, Q_ARG(QString, port));
+    });
 }
 
 void MainWindow::onDfuFileBrowse()

@@ -278,11 +278,17 @@ bool BootFlasher::transact(QSerialPort &port, quint16 opcode, quint16 seq,
 
 bool BootFlasher::openPort(QSerialPort &port, const QString &name, QString *err)
 {
+    return openPortAt(port, name, 115200, false, err);
+}
+
+bool BootFlasher::openPortAt(QSerialPort &port, const QString &name, int baud,
+                             bool forceDtr, QString *err)
+{
     if (port.isOpen())
         port.close();
 
     port.setPortName(name);
-    port.setBaudRate(115200);
+    port.setBaudRate(baud);
     port.setDataBits(QSerialPort::Data8);
     port.setParity(QSerialPort::NoParity);
     port.setStopBits(QSerialPort::OneStop);
@@ -294,12 +300,13 @@ bool BootFlasher::openPort(QSerialPort &port, const QString &name, QString *err)
             port.clear(QSerialPort::AllDirections);
 
             /* 只对真正的 USB CDC 拉高 DTR。
-             * UART 转接板的 DTR 常被接到 RST, 乱拉会把板子按在复位上。
+             * UART 转接板往往只接了 RX/TX/5V/GND, DTR 悬空; 但某些板子
+             * 把 DTR 接到 RST, 乱拉会把 MCU 按在复位上。
              */
             const QSerialPortInfo info(name);
-            if (info.hasVendorIdentifier() && info.hasProductIdentifier()
-                && info.vendorIdentifier() == 0xAFF1
-                && info.productIdentifier() == 0x52B2) {
+            const bool affine = info.hasVendorIdentifier()
+                && info.vendorIdentifier() == 0xAFF1;
+            if (forceDtr || affine) {
                 port.setDataTerminalReady(true);
                 QThread::msleep(20);
             }
@@ -313,6 +320,85 @@ bool BootFlasher::openPort(QSerialPort &port, const QString &name, QString *err)
         *err = QStringLiteral("无法打开 %1: %2").arg(name, last);
     }
     return false;
+}
+
+/* --------------------------------------------------------------------
+ *  通过串口发送 AimeIO 的 JUMP2BOOT
+ *
+ *  固件侧路径: USART1 空闲中断 → Reader_UART_IRQHandler → Packet_process
+ *              → Mode_Detect → AimeIO_packet_check(0xFF 开头) → 取 data[1]
+ *  所以最小帧就是 0xFF 0x62, 这里补齐到 32 字节与 HID 报文等长。
+ *  收到应答(63 字节) 即说明固件已置 boot_flag 并即将跳转。
+ * -------------------------------------------------------------------- */
+
+void BootFlasher::sendAimeJumpToBoot(const QString &portName, int preferredBaud)
+{
+    m_busy.storeRelease(1);
+    m_abort.storeRelease(0);
+
+    QList<int> bauds;
+    if (preferredBaud > 0)
+        bauds << preferredBaud;
+    for (int b : {115200, 38400, 9600}) {
+        if (!bauds.contains(b))
+            bauds << b;
+    }
+
+    QByteArray frame;
+    frame.append(static_cast<char>(0xFF));   /* AimeIO_Start */
+    frame.append(static_cast<char>(0x62));   /* JUMP2BOOT */
+    frame.append(QByteArray(30, '\0'));      /* 补足 32 字节 */
+
+    QString lastErr;
+
+    for (int baud : bauds) {
+        if (m_abort.loadAcquire())
+            break;
+
+        QSerialPort port;
+        QString err;
+        if (!openPortAt(port, portName, baud, true, &err)) {
+            lastErr = err;
+            continue;   /* 端口可能已在上一轮跳转后消失 */
+        }
+
+        emit logLine(QStringLiteral("串口 %1 @ %2 bps: 发送 AimeIO JUMP2BOOT (FF 62)")
+                         .arg(portName).arg(baud));
+
+        const qint64 written = port.write(frame);
+        port.flush();
+        port.waitForBytesWritten(500);
+
+        QByteArray answer;
+        if (written == frame.size()) {
+            /* 固件回 63 字节 (0xFF 0x62 ...) */
+            if (port.waitForReadyRead(500))
+                answer = port.readAll();
+            if (answer.isEmpty() && port.waitForReadyRead(200))
+                answer += port.readAll();
+        }
+
+        const QString writeErr = port.errorString();
+        port.close();
+
+        if (!answer.isEmpty()) {
+            emit logLine(QStringLiteral("收到 %1 字节应答, 读卡器已接受跳转命令")
+                             .arg(answer.size()));
+            m_busy.storeRelease(0);
+            emit serialJumpSent(true, QString());
+            return;
+        }
+
+        if (written != frame.size()) {
+            lastErr = QStringLiteral("写入失败: %1").arg(writeErr);
+            continue;
+        }
+        lastErr = QStringLiteral("%1 bps 无应答").arg(baud);
+    }
+
+    m_busy.storeRelease(0);
+    emit serialJumpSent(false,
+        lastErr.isEmpty() ? QStringLiteral("串口无应答") : lastErr);
 }
 
 bool BootFlasher::handshake(QSerialPort &port, BootHello *hello,

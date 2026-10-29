@@ -121,6 +121,12 @@ public slots:
     /* 重启读卡器: 发 BOOT_APP 跳回应用 */
     void bootApp(const QString &portName);
 
+    /* HID 未连接时, 通过串口发送 AimeIO 的 JUMP2BOOT (0xFF 0x62),
+     * 让应用固件跳进 bootloader。
+     * preferredBaud <= 0 时依次尝试 115200 / 38400 / 9600。
+     */
+    void sendAimeJumpToBoot(const QString &portName, int preferredBaud);
+
     /* 请求中止当前操作 (GUI 线程调用) */
     void requestAbort() { m_abort.storeRelease(1); }
 
@@ -130,9 +136,12 @@ signals:
     void probeFinished(bool ok, const QString &summary);
     void flashFinished(bool ok, const QString &error);
     void bootAppFinished(bool ok, const QString &error);
+    void serialJumpSent(bool ok, const QString &error);
 
 private:
     bool openPort(QSerialPort &port, const QString &name, QString *err);
+    bool openPortAt(QSerialPort &port, const QString &name, int baud,
+                    bool forceDtr, QString *err);
     bool handshake(QSerialPort &port, BootHello *hello,
                    BootDeviceInfo *info, QString *err);
     bool transact(QSerialPort &port, quint16 opcode, quint16 seq,

@@ -90,6 +90,7 @@ private slots:
     void onBootLog(const QString &line);
     void onBootProgress(int percent, const QString &detail);
     void onBootFlashFinished(bool ok, const QString &error);
+    void onSerialJumpSent(bool ok, const QString &error);
     void onRebootReader();
     void onRebootFinished(bool ok, const QString &error);
     void onProbeFinished(bool ok, const QString &summary);
@@ -157,6 +158,9 @@ private:
     void    refreshPortCombo();
     bool    bootloaderPort(ComPortInfo *out) const;
     bool    dfuDevicePresent() const;
+    void    showEnterDialog(int mode, const QString &text);
+    void    finishEnterSuccess();
+    int     configuredBaud() const;
     static QString idmToDecimal(const QByteArray &idm);
 
     /* 辅助 */
